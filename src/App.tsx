@@ -14,8 +14,9 @@ import {
 } from "lucide-react";
 import { SceneViewport } from "./components/SceneViewport";
 import { buildRecommendedParams, parsePartFile, validateParams } from "./geometry/partAnalysis";
-import { exportBowlToStl } from "./geometry/vibratoryBowl";
-import { BowlParams, defaultParams, PartAnalysis } from "./types";
+import { exportBowl } from "./geometry/vibratoryBowl";
+import { defaultParams } from "./types";
+import type { BowlParams, ExportFormat, PartAnalysis } from "./types";
 
 type NumericParamKey = {
   [K in keyof BowlParams]: BowlParams[K] extends number ? K : never;
@@ -25,6 +26,7 @@ function App() {
   const [params, setParams] = useState<BowlParams>(defaultParams);
   const [analysis, setAnalysis] = useState<PartAnalysis | null>(null);
   const [partObject, setPartObject] = useState<THREE.Object3D | null>(null);
+  const [exportFormat, setExportFormat] = useState<ExportFormat>("stl");
   const [status, setStatus] = useState("等待导入零件，或直接调整参数生成振动盘。");
   const [isLoading, setIsLoading] = useState(false);
   const warnings = useMemo(() => validateParams(params), [params]);
@@ -73,18 +75,18 @@ function App() {
     setStatus("已恢复默认振动盘参数。");
   };
 
-  const exportStl = () => {
-    const stl = exportBowlToStl(params);
-    const blob = new Blob([stl], { type: "model/stl" });
+  const exportModel = () => {
+    const exported = exportBowl(params, exportFormat);
+    const blob = new Blob([exported.content], { type: exported.mimeType });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = "vibratory-bowl-generated.stl";
+    link.download = exported.fileName;
     document.body.appendChild(link);
     link.click();
     link.remove();
     URL.revokeObjectURL(url);
-    setStatus("已在本地生成并导出 STL 文件。");
+    setStatus(`已在本地生成并导出 ${exported.label} 文件。`);
   };
 
   return (
@@ -108,10 +110,22 @@ function App() {
             <RefreshCw size={16} />
             默认参数
           </button>
-          <button type="button" className="primary-button" onClick={exportStl}>
-            <Download size={16} />
-            导出 STL
-          </button>
+          <div className="export-actions">
+            <select
+              className="export-select"
+              value={exportFormat}
+              aria-label="导出格式"
+              onChange={(event) => setExportFormat(event.target.value as ExportFormat)}
+            >
+              <option value="stl">STL</option>
+              <option value="obj">OBJ</option>
+              <option value="step">STEP</option>
+            </select>
+            <button type="button" className="primary-button" onClick={exportModel}>
+              <Download size={16} />
+              导出
+            </button>
+          </div>
         </div>
       </header>
 
@@ -414,6 +428,24 @@ function App() {
                   逆时针
                 </button>
               </div>
+            </div>
+
+            <div className="field-group">
+              <label className="field-label">出料姿态</label>
+              <select
+                className="field-select"
+                value={params.outletOrientation}
+                onChange={(event) => setParams((current) => ({
+                  ...current,
+                  outletOrientation: event.target.value as BowlParams["outletOrientation"],
+                }))}
+              >
+                <option value="free">不限制</option>
+                <option value="frontUp">正面朝上</option>
+                <option value="backUp">背面朝上</option>
+                <option value="sideUp">侧面朝上</option>
+                <option value="standing">立式出料</option>
+              </select>
             </div>
           </section>
 

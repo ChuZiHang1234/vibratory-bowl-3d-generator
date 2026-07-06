@@ -33,7 +33,8 @@ body,
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -43,7 +44,8 @@ button {
 }
 
 button:disabled,
-input:disabled {
+input:disabled,
+select:disabled {
   cursor: not-allowed;
   opacity: 0.58;
 }
@@ -106,6 +108,12 @@ input:disabled {
   flex-shrink: 0;
 }
 
+.export-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .offline-badge,
 .primary-button,
 .secondary-button,
@@ -136,6 +144,29 @@ input:disabled {
 
 .primary-button:hover {
   background: var(--teal-strong);
+}
+
+.export-select,
+.field-select {
+  height: 38px;
+  padding: 0 34px 0 11px;
+  color: #17222b;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  outline: none;
+  background: #ffffff;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.export-select:focus,
+.field-select:focus {
+  border-color: var(--teal);
+  box-shadow: 0 0 0 3px rgba(35, 125, 136, 0.14);
+}
+
+.field-select {
+  width: 100%;
 }
 
 .secondary-button,
@@ -543,4 +574,3 @@ input:disabled {
     display: none;
   }
 }
-

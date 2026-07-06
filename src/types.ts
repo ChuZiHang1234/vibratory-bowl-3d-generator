@@ -1,6 +1,8 @@
 export type BowlShape = "round" | "rect";
 export type BowlProfile = "cylindrical" | "conical";
 export type FeedDirection = "clockwise" | "counterclockwise";
+export type ExportFormat = "stl" | "obj" | "step";
+export type OutletOrientation = "free" | "frontUp" | "backUp" | "sideUp" | "standing";
 
 export interface BowlParams {
   shape: BowlShape;
@@ -20,6 +22,7 @@ export interface BowlParams {
   outletWidth: number;
   outletHeight: number;
   outletLength: number;
+  outletOrientation: OutletOrientation;
   feedDirection: FeedDirection;
   baseLength: number;
   baseWidth: number;
@@ -56,6 +59,7 @@ export const defaultParams: BowlParams = {
   outletWidth: 48,
   outletHeight: 34,
   outletLength: 130,
+  outletOrientation: "free",
   feedDirection: "clockwise",
   baseLength: 520,
   baseWidth: 520,

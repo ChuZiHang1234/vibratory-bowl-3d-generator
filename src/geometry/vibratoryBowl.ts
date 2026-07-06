@@ -1,6 +1,7 @@
 import * as THREE from "three";
+import { OBJExporter } from "three/examples/jsm/exporters/OBJExporter.js";
 import { STLExporter } from "three/examples/jsm/exporters/STLExporter.js";
-import { BowlParams } from "../types";
+import type { BowlParams, ExportFormat } from "../types";
 
 const TRACK_FLOOR_OVERLAP = 0.8;
 const TRACK_LEAD_IN_RATIO = 0.08;
@@ -57,10 +58,223 @@ export function createVibratoryBowl(params: BowlParams) {
 }
 
 export function exportBowlToStl(params: BowlParams) {
-  const group = createVibratoryBowl(params);
+  const group = createMeshOnlyExportGroup(params);
   group.updateMatrixWorld(true);
   const exporter = new STLExporter();
   return exporter.parse(group, { binary: false }) as string;
+}
+
+export function exportBowlToObj(params: BowlParams) {
+  const group = createMeshOnlyExportGroup(params);
+  group.updateMatrixWorld(true);
+  const exporter = new OBJExporter();
+  return exporter.parse(group);
+}
+
+export function exportBowlToStep(params: BowlParams) {
+  const triangles = collectMeshTriangles(params);
+  return createFacetedStepFile(triangles);
+}
+
+export function exportBowl(params: BowlParams, format: ExportFormat) {
+  const upperFormat = format.toUpperCase();
+  const extension = format === "step" ? "step" : format;
+  const mimeType = format === "obj"
+    ? "text/plain"
+    : format === "step"
+      ? "model/step"
+      : "model/stl";
+  const content = format === "obj"
+    ? exportBowlToObj(params)
+    : format === "step"
+      ? exportBowlToStep(params)
+      : exportBowlToStl(params);
+
+  return {
+    content,
+    extension,
+    label: upperFormat,
+    mimeType,
+    fileName: `vibratory-bowl-generated.${extension}`,
+  };
+}
+
+interface StepTriangle {
+  a: THREE.Vector3;
+  b: THREE.Vector3;
+  c: THREE.Vector3;
+}
+
+function createMeshOnlyExportGroup(params: BowlParams) {
+  const source = createVibratoryBowl(params);
+  source.updateMatrixWorld(true);
+
+  const group = new THREE.Group();
+  group.name = "vibratory-bowl-export";
+
+  source.traverse((child) => {
+    if (!isMesh(child)) return;
+
+    const geometry = child.geometry.clone();
+    geometry.applyMatrix4(child.matrixWorld);
+    geometry.computeVertexNormals();
+
+    const mesh = new THREE.Mesh(geometry, child.material);
+    mesh.name = sanitizeExportName(child.name);
+    group.add(mesh);
+  });
+
+  group.updateMatrixWorld(true);
+  return group;
+}
+
+function collectMeshTriangles(params: BowlParams) {
+  const group = createVibratoryBowl(params);
+  const triangles: StepTriangle[] = [];
+  group.updateMatrixWorld(true);
+
+  group.traverse((child) => {
+    if (!isMesh(child)) return;
+
+    const geometry = child.geometry;
+    const positions = geometry.getAttribute("position");
+    if (!positions) return;
+
+    const indices = geometry.getIndex();
+    const readVertex = (index: number) => new THREE.Vector3()
+      .fromBufferAttribute(positions, index)
+      .applyMatrix4(child.matrixWorld);
+
+    const pushTriangle = (aIndex: number, bIndex: number, cIndex: number) => {
+      const a = readVertex(aIndex);
+      const b = readVertex(bIndex);
+      const c = readVertex(cIndex);
+      const areaNormal = new THREE.Vector3()
+        .subVectors(b, a)
+        .cross(new THREE.Vector3().subVectors(c, a));
+
+      if (areaNormal.lengthSq() < 0.000001) return;
+      triangles.push({ a, b, c });
+    };
+
+    if (indices) {
+      for (let i = 0; i < indices.count; i += 3) {
+        pushTriangle(indices.getX(i), indices.getX(i + 1), indices.getX(i + 2));
+      }
+      return;
+    }
+
+    for (let i = 0; i < positions.count; i += 3) {
+      pushTriangle(i, i + 1, i + 2);
+    }
+  });
+
+  return triangles;
+}
+
+function createFacetedStepFile(triangles: StepTriangle[]) {
+  const entities: string[] = [];
+  let nextId = 1;
+  const addEntity = (body: string) => {
+    const id = nextId;
+    nextId += 1;
+    entities.push(`#${id}=${body};`);
+    return id;
+  };
+
+  const applicationContext = addEntity("APPLICATION_CONTEXT('automotive design')");
+  addEntity(`APPLICATION_PROTOCOL_DEFINITION('international standard','automotive_design',2000,#${applicationContext})`);
+  const productContext = addEntity(`PRODUCT_CONTEXT('',#${applicationContext},'mechanical')`);
+  const product = addEntity(`PRODUCT('Vibratory Bowl Generator','Vibratory Bowl Generator','',(#${productContext}))`);
+  const formation = addEntity(`PRODUCT_DEFINITION_FORMATION_WITH_SPECIFIED_SOURCE('','',#${product},.NOT_KNOWN.)`);
+  const definitionContext = addEntity(`PRODUCT_DEFINITION_CONTEXT('part definition',#${applicationContext},'design')`);
+  const definition = addEntity(`PRODUCT_DEFINITION('design','',#${formation},#${definitionContext})`);
+
+  const origin = addEntity("CARTESIAN_POINT('',(0.,0.,0.))");
+  const zDirection = addEntity("DIRECTION('',(0.,0.,1.))");
+  const xDirection = addEntity("DIRECTION('',(1.,0.,0.))");
+  const axis = addEntity(`AXIS2_PLACEMENT_3D('',#${origin},#${zDirection},#${xDirection})`);
+  const lengthUnit = addEntity("(LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.))");
+  const angleUnit = addEntity("(NAMED_UNIT(*) PLANE_ANGLE_UNIT() SI_UNIT($,.RADIAN.))");
+  const solidAngleUnit = addEntity("(NAMED_UNIT(*) SI_UNIT($,.STERADIAN.) SOLID_ANGLE_UNIT())");
+  const uncertainty = addEntity(`UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(0.001),#${lengthUnit},'distance_accuracy_value','')`);
+  const context = addEntity(`GEOMETRIC_REPRESENTATION_CONTEXT(3) GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#${uncertainty})) GLOBAL_UNIT_ASSIGNED_CONTEXT((#${lengthUnit},#${angleUnit},#${solidAngleUnit})) REPRESENTATION_CONTEXT('3D Context','')`);
+
+  const pointIds = new Map<string, number>();
+  const faceIds: number[] = [];
+  const getPointId = (point: THREE.Vector3) => {
+    const key = formatPointKey(point);
+    const existing = pointIds.get(key);
+    if (existing) return existing;
+
+    const id = addEntity(`CARTESIAN_POINT('',${formatStepVector(point)})`);
+    pointIds.set(key, id);
+    return id;
+  };
+
+  triangles.forEach((triangle) => {
+    const a = getPointId(triangle.a);
+    const b = getPointId(triangle.b);
+    const c = getPointId(triangle.c);
+    const edge = new THREE.Vector3().subVectors(triangle.b, triangle.a).normalize();
+    const normal = new THREE.Vector3()
+      .subVectors(triangle.b, triangle.a)
+      .cross(new THREE.Vector3().subVectors(triangle.c, triangle.a))
+      .normalize();
+
+    const normalDirection = addEntity(`DIRECTION('',${formatStepVector(normal)})`);
+    const referenceDirection = addEntity(`DIRECTION('',${formatStepVector(edge)})`);
+    const placement = addEntity(`AXIS2_PLACEMENT_3D('',#${a},#${normalDirection},#${referenceDirection})`);
+    const plane = addEntity(`PLANE('',#${placement})`);
+    const loop = addEntity(`POLY_LOOP('',(#${a},#${b},#${c}))`);
+    const bound = addEntity(`FACE_OUTER_BOUND('',#${loop},.T.)`);
+    const face = addEntity(`ADVANCED_FACE('',(#${bound}),#${plane},.T.)`);
+    faceIds.push(face);
+  });
+
+  const shell = addEntity(`CLOSED_SHELL('',(${faceIds.map((id) => `#${id}`).join(",")}))`);
+  const solid = addEntity(`MANIFOLD_SOLID_BREP('Vibratory Bowl',#${shell})`);
+  const representation = addEntity(`ADVANCED_BREP_SHAPE_REPRESENTATION('Vibratory Bowl',(#${axis},#${solid}),#${context})`);
+  const shape = addEntity(`PRODUCT_DEFINITION_SHAPE('','',#${definition})`);
+  addEntity(`SHAPE_DEFINITION_REPRESENTATION(#${shape},#${representation})`);
+
+  const timestamp = new Date().toISOString().replace(/\.\d{3}Z$/, "");
+
+  return [
+    "ISO-10303-21;",
+    "HEADER;",
+    "FILE_DESCRIPTION(('Faceted STEP AP214 generated locally'),'2;1');",
+    `FILE_NAME('vibratory-bowl-generated.step','${timestamp}',('Vibratory Bowl Generator'),('Vibratory Bowl Generator'),'Vibratory Bowl Generator','Vibratory Bowl Generator','');`,
+    "FILE_SCHEMA(('AUTOMOTIVE_DESIGN_CC2'));",
+    "ENDSEC;",
+    "DATA;",
+    ...entities,
+    "ENDSEC;",
+    "END-ISO-10303-21;",
+  ].join("\n");
+}
+
+function isMesh(object: THREE.Object3D): object is THREE.Mesh<THREE.BufferGeometry> {
+  return (object as THREE.Mesh).isMesh === true && (object as THREE.Mesh).geometry?.isBufferGeometry === true;
+}
+
+function sanitizeExportName(name: string) {
+  return (name || "mesh").replace(/\s+/g, "_");
+}
+
+function formatPointKey(point: THREE.Vector3) {
+  return [point.x, point.y, point.z].map((value) => formatStepNumber(value, 4)).join(",");
+}
+
+function formatStepVector(vector: THREE.Vector3) {
+  return `(${formatStepNumber(vector.x)},${formatStepNumber(vector.y)},${formatStepNumber(vector.z)})`;
+}
+
+function formatStepNumber(value: number, precision = 6) {
+  const normalized = Math.abs(value) < 10 ** -precision ? 0 : value;
+  const rounded = Number(normalized.toFixed(precision));
+  const text = rounded.toString();
+  return text.includes(".") || text.includes("e") ? text : `${text}.`;
 }
 
 function createBase(params: BowlParams) {
@@ -256,11 +470,107 @@ function createOutlet(params: BowlParams) {
   );
   outlet.name = "出料直轨";
   outlet.position.set(position.x, y, position.z);
-  outlet.quaternion.copy(getOutletQuaternion(layout.tangent, layout.radial));
+  outlet.quaternion.copy(getOutletQuaternion(layout.tangent));
 
   const group = new THREE.Group();
   group.name = "出料口";
   group.add(withEdges(outlet, 0x1f5963));
+  group.add(createOutletOrientationGuides(params, layout, y, totalOutletLength));
+  return group;
+}
+
+function createOutletOrientationGuides(
+  params: BowlParams,
+  layout: ReturnType<typeof getOutletLayout>,
+  trackCenterY: number,
+  totalOutletLength: number,
+) {
+  const group = new THREE.Group();
+  group.name = "出料姿态导向";
+  if (params.outletOrientation === "free") return group;
+
+  const railThickness = Math.max(4, params.wallThickness);
+  const startPoint = layout.radial.clone().multiplyScalar(layout.trackCenterRadius);
+  const xAxis = layout.tangent.clone().normalize();
+  const zAxis = getOutletSideAxis(layout.tangent);
+  const orientation = getOutletQuaternion(layout.tangent);
+  const guideLength = THREE.MathUtils.clamp(
+    params.outletLength * 0.76,
+    Math.min(70, totalOutletLength),
+    Math.max(80, totalOutletLength - railThickness * 3),
+  );
+  const guideStart = THREE.MathUtils.clamp(
+    layout.wallExitDistance + railThickness,
+    0,
+    Math.max(0, totalOutletLength - guideLength),
+  );
+
+  const addBox = (
+    name: string,
+    size: [number, number, number],
+    localPosition: [number, number, number],
+    edgeColor = 0x55616d,
+  ) => {
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(size[0], size[1], size[2]), materials.guard.clone());
+    mesh.name = name;
+    const position = startPoint
+      .clone()
+      .add(xAxis.clone().multiplyScalar(localPosition[0]))
+      .add(zAxis.clone().multiplyScalar(localPosition[2]));
+    mesh.position.set(position.x, trackCenterY + localPosition[1], position.z);
+    mesh.quaternion.copy(orientation);
+    group.add(withEdges(mesh, edgeColor));
+  };
+
+  const sideGuide = (height: number, laneWidth = params.outletWidth) => {
+    const centerX = guideStart + guideLength / 2;
+    const centerY = params.trackThickness / 2 + height / 2;
+    const sideOffset = laneWidth / 2 + railThickness / 2;
+    addBox("出料姿态左导条", [guideLength, height, railThickness], [centerX, centerY, sideOffset]);
+    addBox("出料姿态右导条", [guideLength, height, railThickness], [centerX, centerY, -sideOffset]);
+  };
+
+  if (params.outletOrientation === "sideUp" || params.outletOrientation === "standing") {
+    const guideHeight = params.outletOrientation === "standing"
+      ? Math.max(params.outletHeight * 0.9, params.guardHeight + params.trackThickness)
+      : Math.max(params.guardHeight, params.outletHeight * 0.58);
+    const laneWidth = params.outletOrientation === "standing"
+      ? Math.max(params.trackWidth * 0.42, params.outletWidth * 0.54)
+      : params.outletWidth;
+
+    sideGuide(guideHeight, laneWidth);
+
+    if (params.outletOrientation === "standing") {
+      addBox(
+        "立式出料底部定位筋",
+        [guideLength * 0.75, railThickness * 1.4, railThickness],
+        [guideStart + guideLength * 0.48, params.trackThickness / 2 + railThickness * 0.7, 0],
+        0x1f5963,
+      );
+    }
+
+    return group;
+  }
+
+  const sideHeight = Math.max(10, Math.min(params.guardHeight * 0.48, params.outletHeight * 0.35));
+  const holdDownLength = guideLength * 0.7;
+  const holdDownClearance = Math.max(
+    params.trackThickness + 8,
+    Math.min(params.outletHeight, params.guardHeight + params.trackThickness + 12),
+  );
+  const sideBias = params.outletOrientation === "backUp" ? -1 : 1;
+
+  sideGuide(sideHeight);
+  addBox(
+    params.outletOrientation === "backUp" ? "背面朝上限高压板" : "正面朝上限高压板",
+    [holdDownLength, railThickness, params.outletWidth * 0.76],
+    [
+      guideStart + holdDownLength / 2,
+      params.trackThickness / 2 + holdDownClearance + railThickness / 2,
+      sideBias * params.outletWidth * 0.08,
+    ],
+  );
+
   return group;
 }
 
@@ -380,12 +690,31 @@ function smoothstep(t: number) {
 
 function getOutletGap(params: BowlParams) {
   const layout = getOutletLayout(params);
-  const topRadius = Math.max(1, layout.outerRadius);
-  const openingWidth = params.outletWidth + params.wallThickness * 3;
-  const size = THREE.MathUtils.clamp(openingWidth / topRadius, 0.18, 0.36);
+  const halfOpeningWidth = params.outletWidth / 2 + params.wallThickness * 2;
+  const innerEdgeRadius = THREE.MathUtils.clamp(
+    layout.trackCenterRadius - halfOpeningWidth,
+    1,
+    layout.outerRadius - 0.1,
+  );
+  const outerEdgeRadius = THREE.MathUtils.clamp(
+    layout.trackCenterRadius + halfOpeningWidth,
+    1,
+    layout.outerRadius - 0.1,
+  );
+  const innerEdgeOffset = Math.acos(THREE.MathUtils.clamp(innerEdgeRadius / layout.outerRadius, -1, 1));
+  const outerEdgeOffset = Math.acos(THREE.MathUtils.clamp(outerEdgeRadius / layout.outerRadius, -1, 1));
+  const startOffset = Math.min(innerEdgeOffset, outerEdgeOffset);
+  const endOffset = Math.max(innerEdgeOffset, outerEdgeOffset);
+  const angularMargin = THREE.MathUtils.clamp(
+    (params.wallThickness * 2 + params.trackThickness) / layout.outerRadius,
+    0.03,
+    0.12,
+  );
+  const centerOffset = (startOffset + endOffset) / 2;
+  const size = THREE.MathUtils.clamp(endOffset - startOffset + angularMargin * 2, 0.2, 1.15);
 
   return {
-    center: layout.wallExitAngle,
+    center: layout.endAngle + layout.sign * centerOffset,
     size,
   };
 }
@@ -406,6 +735,8 @@ function getOutletLayout(params: BowlParams) {
     .add(tangent.clone().multiplyScalar(wallExitDistance));
 
   return {
+    sign,
+    endAngle,
     radial,
     tangent,
     outerRadius,
@@ -429,13 +760,22 @@ function getOutletCutTopY(params: BowlParams, cutBottomY: number) {
   return THREE.MathUtils.clamp(cutBottomY + railWindowHeight, cutBottomY + params.trackThickness + 4, topLimit);
 }
 
-function getOutletQuaternion(tangent: THREE.Vector3, radial: THREE.Vector3) {
+function getOutletQuaternion(tangent: THREE.Vector3) {
+  const xAxis = tangent.clone().normalize();
+  const yAxis = new THREE.Vector3(0, 1, 0);
+  const zAxis = getOutletSideAxis(tangent);
   const matrix = new THREE.Matrix4().makeBasis(
-    tangent.clone().normalize(),
-    new THREE.Vector3(0, 1, 0),
-    radial.clone().normalize(),
+    xAxis,
+    yAxis,
+    zAxis,
   );
   return new THREE.Quaternion().setFromRotationMatrix(matrix);
+}
+
+function getOutletSideAxis(tangent: THREE.Vector3) {
+  return new THREE.Vector3()
+    .crossVectors(tangent.clone().normalize(), new THREE.Vector3(0, 1, 0))
+    .normalize();
 }
 
 function createFrustumSideGeometry(
