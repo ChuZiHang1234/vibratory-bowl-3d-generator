@@ -140,10 +140,18 @@ npm.cmd run desktop:dev
 npm.cmd run build
 ```
 
-打包 Windows 便携版：
+打包 Windows 安装程序：
 
 ```bash
 npm.cmd run package:win
+```
+
+安装程序会在安装过程中询问是否创建桌面快捷方式。
+
+如需打包免安装便携版：
+
+```bash
+npm.cmd run package:portable
 ```
 
 > 依赖安装和打包阶段需要下载本地开发依赖；打包后的软件运行时不需要联网。
