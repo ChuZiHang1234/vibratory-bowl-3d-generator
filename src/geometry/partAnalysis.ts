@@ -1,7 +1,33 @@
 import * as THREE from "three";
+import occtImport from "occt-import-js";
+import occtWasmUrl from "occt-import-js/dist/occt-import-js.wasm?url";
 import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader.js";
 import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
-import { BowlParams, defaultParams, PartAnalysis } from "../types";
+import { defaultParams } from "../types";
+import type { BowlParams, PartAnalysis, PartTopFace } from "../types";
+import { getMotionConstraints } from "./bowlMotion";
+import type { PhysicalEnvelope } from "./bowlMotion";
+
+type OcctMesh = {
+  name?: string;
+  color?: number[];
+  attributes: {
+    position: { array: ArrayLike<number> | number[][] };
+    normal?: { array: ArrayLike<number> | number[][] };
+  };
+  index?: { array: ArrayLike<number> | number[][] };
+};
+
+type OcctReadResult = {
+  success: boolean;
+  meshes?: OcctMesh[];
+};
+
+type OcctModule = {
+  ReadStepFile: (content: Uint8Array, params: Record<string, unknown> | null) => OcctReadResult;
+};
+
+let occtModulePromise: Promise<OcctModule> | null = null;
 
 const importedMaterial = new THREE.MeshStandardMaterial({
   color: 0x2f7d8c,
@@ -47,22 +73,163 @@ export async function parsePartFile(file: File): Promise<{
     };
   }
 
-  throw new Error("当前原型支持 STL 和 OBJ；STEP 将在本地 CAD 内核模块中扩展。");
+  if (extension === "step" || extension === "stp") {
+    const object = await parseStepFile(file);
+    centerObject(object);
+    return {
+      object,
+      analysis: analyzeObject(object, file.name, "STEP"),
+    };
+  }
+
+  throw new Error("当前原型支持 STL、OBJ、STEP 文件。");
+}
+
+async function parseStepFile(file: File) {
+  const occt = await getOcctModule();
+  const buffer = await file.arrayBuffer();
+  const result = occt.ReadStepFile(new Uint8Array(buffer), {
+    linearUnit: "millimeter",
+    linearDeflectionType: "bounding_box_ratio",
+    linearDeflection: 0.0008,
+    angularDeflection: 0.5,
+  });
+
+  if (!result.success || !result.meshes?.length) {
+    throw new Error("STEP 文件解析失败，请检查文件是否为有效的 STEP/STP 模型。");
+  }
+
+  const group = new THREE.Group();
+  group.name = file.name;
+
+  result.meshes.forEach((mesh, index) => {
+    const geometry = createGeometryFromOcctMesh(mesh);
+    const material = importedMaterial.clone();
+
+    if (mesh.color && mesh.color.length >= 3) {
+      material.color = new THREE.Color(mesh.color[0], mesh.color[1], mesh.color[2]);
+    }
+
+    const child = new THREE.Mesh(geometry, material);
+    child.name = mesh.name || `${file.name}-${index + 1}`;
+    group.add(child);
+  });
+
+  return group;
+}
+
+function getOcctModule() {
+  occtModulePromise ??= occtImport({
+    locateFile: (path) => path.endsWith(".wasm") ? occtWasmUrl : path,
+  }).then((module) => module as OcctModule);
+
+  return occtModulePromise;
+}
+
+function createGeometryFromOcctMesh(mesh: OcctMesh) {
+  const geometry = new THREE.BufferGeometry();
+  const positions = toFlatNumberArray(mesh.attributes.position.array);
+  const normals = mesh.attributes.normal ? toFlatNumberArray(mesh.attributes.normal.array) : [];
+  const indices = mesh.index ? toFlatNumberArray(mesh.index.array) : [];
+
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  if (normals.length === positions.length) {
+    geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+  }
+
+  if (indices.length > 0) {
+    geometry.setIndex(indices);
+  }
+
+  if (!geometry.getAttribute("normal")) {
+    geometry.computeVertexNormals();
+  }
+
+  geometry.computeBoundingBox();
+  geometry.computeBoundingSphere();
+  return geometry;
+}
+
+function toFlatNumberArray(values: ArrayLike<number> | number[][]) {
+  if (Array.isArray(values) && Array.isArray(values[0])) {
+    return values.flat();
+  }
+
+  return Array.from(values as ArrayLike<number>);
 }
 
 export function buildRecommendedParams(
   analysis: PartAnalysis,
   current: BowlParams = defaultParams,
 ): BowlParams {
-  const maxPlan = Math.max(analysis.length, analysis.width);
-  const crossSize = Math.max(Math.min(analysis.length, analysis.width), analysis.height);
-  const clearance = Math.max(8, crossSize * 0.18);
-  const trackWidth = roundToStep(crossSize + clearance * 2, 5);
-  const bowlDiameter = roundToStep(Math.max(300, maxPlan * 5.2, trackWidth * 7.6), 10);
-  const bowlHeight = roundToStep(Math.max(120, analysis.height * 4.5 + 70), 10);
+  const envelope = getAnalysisEnvelope(analysis, current.partTopFace);
+  const wallThickness = current.wallThickness || defaultParams.wallThickness;
+  const trackThickness = current.trackThickness || defaultParams.trackThickness;
+  const lateralClearance = Math.max(8, Math.min(18, envelope.width * 0.18));
+  let trackWidth = roundToStep(
+    Math.max(
+      defaultParams.trackWidth,
+      envelope.width + lateralClearance * 2 + wallThickness * 1.5,
+      envelope.width * 1.3,
+    ),
+    5,
+  );
+  let outletHeight = roundToStep(
+    Math.max(30, getRequiredOutletPoseHeight(current, envelope) + trackThickness + 10),
+    2,
+  );
+  let diameterPadding = 0;
+
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const candidate = createRecommendedCandidate(current, envelope, trackWidth, outletHeight, diameterPadding);
+    const constraints = getMotionConstraints(candidate, envelope);
+    let changed = false;
+
+    if (!constraints.canEnterTrack) {
+      const shortage = constraints.requiredLaneWidth - constraints.laneWidth;
+      trackWidth = roundToStep(trackWidth + Math.max(5, shortage + wallThickness * 1.5), 5);
+      diameterPadding += Math.max(10, envelope.length * 0.12);
+      changed = true;
+    }
+
+    if (!constraints.canExit) {
+      const shortage = constraints.requiredOutletHeight - constraints.outletHeight;
+      outletHeight = roundToStep(outletHeight + Math.max(2, shortage + 6), 2);
+      changed = true;
+    }
+
+    if (!changed) {
+      return candidate;
+    }
+  }
+
+  return createRecommendedCandidate(current, envelope, trackWidth, outletHeight, diameterPadding);
+}
+
+function createRecommendedCandidate(
+  current: BowlParams,
+  envelope: PhysicalEnvelope,
+  trackWidth: number,
+  outletHeight: number,
+  diameterPadding: number,
+): BowlParams {
+  const bowlDiameter = getRecommendedBowlDiameter(envelope, trackWidth, current, diameterPadding);
   const trackTurns = clamp(roundToStep(Math.max(1.5, bowlDiameter / 180), 0.5), 1.5, 5);
-  const risePerTurn = roundToStep(Math.max(16, analysis.height * 1.15 + 10), 5);
-  const baseLength = roundToStep(Math.max(bowlDiameter + 100, maxPlan * 6), 10);
+  const risePerTurn = roundToStep(Math.max(16, envelope.height * 1.15 + 10), 5);
+  const guardHeight = roundToStep(Math.max(18, envelope.height * 0.65 + 12), 2);
+  const totalRise = trackTurns * risePerTurn;
+  const bowlHeight = roundToStep(
+    Math.max(
+      120,
+      envelope.height * 4.5 + 70,
+      totalRise + guardHeight + current.bottomThickness + current.trackThickness + 28,
+    ),
+    10,
+  );
+  const baseLength = roundToStep(
+    Math.max(bowlDiameter + 100, envelope.length * 6, trackWidth * 8),
+    10,
+  );
 
   return {
     ...current,
@@ -74,14 +241,79 @@ export function buildRecommendedParams(
     trackTurns,
     trackWidth,
     trackRisePerTurn: risePerTurn,
-    guardHeight: roundToStep(Math.max(18, analysis.height * 0.65 + 12), 2),
-    outletWidth: roundToStep(trackWidth + 8, 2),
-    outletHeight: roundToStep(Math.max(30, analysis.height * 1.45), 2),
-    outletLength: roundToStep(Math.max(110, trackWidth * 2.5), 10),
+    guardHeight,
+    outletWidth: roundToStep(Math.max(trackWidth + 8, envelope.width + 16), 2),
+    outletHeight,
+    outletLength: roundToStep(Math.max(110, trackWidth * 2.5, envelope.length * 1.25), 10),
     baseLength,
     baseWidth: baseLength,
     baseHeight: roundToStep(Math.max(60, bowlHeight * 0.42), 10),
   };
+}
+
+function getRecommendedBowlDiameter(
+  envelope: PhysicalEnvelope,
+  trackWidth: number,
+  current: BowlParams,
+  diameterPadding: number,
+) {
+  const profileScale = current.bowlProfile === "conical"
+    ? 1 / clamp(current.conicalBottomRatio / 100, 0.45, 1)
+    : 1;
+  const baseDiameter = Math.max(
+    300,
+    envelope.length * 5.8 * profileScale,
+    trackWidth * 7.8 * profileScale,
+  );
+
+  return roundToStep(baseDiameter + diameterPadding, 10);
+}
+
+export function getAnalysisEnvelope(analysis: PartAnalysis, topFace: PartTopFace): PhysicalEnvelope {
+  const size = getTopAlignedAnalysisSize(analysis, topFace);
+  const horizontal = [size.x, size.z].sort((a, b) => b - a);
+
+  return {
+    height: size.y,
+    length: horizontal[0],
+    width: horizontal[1],
+  };
+}
+
+function getTopAlignedAnalysisSize(analysis: PartAnalysis, topFace: PartTopFace) {
+  if (topFace === "xPositive" || topFace === "xNegative") {
+    return {
+      x: analysis.height,
+      y: analysis.length,
+      z: analysis.width,
+    };
+  }
+
+  if (topFace === "zPositive" || topFace === "zNegative") {
+    return {
+      x: analysis.length,
+      y: analysis.width,
+      z: analysis.height,
+    };
+  }
+
+  return {
+    x: analysis.length,
+    y: analysis.height,
+    z: analysis.width,
+  };
+}
+
+function getRequiredOutletPoseHeight(params: Pick<BowlParams, "outletOrientation">, envelope: PhysicalEnvelope) {
+  if (params.outletOrientation === "sideUp") {
+    return Math.max(envelope.height, envelope.width);
+  }
+
+  if (params.outletOrientation === "standing") {
+    return Math.max(envelope.height, envelope.length, envelope.width);
+  }
+
+  return envelope.height;
 }
 
 export function validateParams(params: BowlParams): string[] {

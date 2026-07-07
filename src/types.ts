@@ -3,6 +3,14 @@ export type BowlProfile = "cylindrical" | "conical";
 export type FeedDirection = "clockwise" | "counterclockwise";
 export type ExportFormat = "stl" | "obj" | "step";
 export type OutletOrientation = "free" | "frontUp" | "backUp" | "sideUp" | "standing";
+export type PartTopFace =
+  | "auto"
+  | "xPositive"
+  | "xNegative"
+  | "yPositive"
+  | "yNegative"
+  | "zPositive"
+  | "zNegative";
 
 export interface BowlParams {
   shape: BowlShape;
@@ -23,15 +31,31 @@ export interface BowlParams {
   outletHeight: number;
   outletLength: number;
   outletOrientation: OutletOrientation;
+  partTopFace: PartTopFace;
   feedDirection: FeedDirection;
   baseLength: number;
   baseWidth: number;
   baseHeight: number;
 }
 
+export interface PartFaceSelection {
+  axis: PartTopFace;
+  label: string;
+  normal: [number, number, number];
+}
+
+export interface AnimationParams {
+  enabled: boolean;
+  voltage: number;
+  frequency: number;
+  amplitude: number;
+  speed: number;
+  partCount: number;
+}
+
 export interface PartAnalysis {
   fileName: string;
-  format: "STL" | "OBJ";
+  format: "STL" | "OBJ" | "STEP";
   length: number;
   width: number;
   height: number;
@@ -60,8 +84,18 @@ export const defaultParams: BowlParams = {
   outletHeight: 34,
   outletLength: 130,
   outletOrientation: "free",
+  partTopFace: "auto",
   feedDirection: "clockwise",
   baseLength: 520,
   baseWidth: 520,
   baseHeight: 70,
+};
+
+export const defaultAnimationParams: AnimationParams = {
+  enabled: false,
+  voltage: 180,
+  frequency: 50,
+  amplitude: 3,
+  speed: 1,
+  partCount: 6,
 };

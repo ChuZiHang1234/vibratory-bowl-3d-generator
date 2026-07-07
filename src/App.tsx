@@ -13,29 +13,82 @@ import {
   WifiOff,
 } from "lucide-react";
 import { SceneViewport } from "./components/SceneViewport";
-import { buildRecommendedParams, parsePartFile, validateParams } from "./geometry/partAnalysis";
+import { createFaceSelectionFromAxis, getPartTopFaceLabel } from "./components/PartFacePreview";
+import { getMotionConstraints, getVibrationFeedRate } from "./geometry/bowlMotion";
+import { buildRecommendedParams, getAnalysisEnvelope, parsePartFile, validateParams } from "./geometry/partAnalysis";
 import { exportBowl } from "./geometry/vibratoryBowl";
-import { defaultParams } from "./types";
-import type { BowlParams, ExportFormat, PartAnalysis } from "./types";
+import { defaultAnimationParams, defaultParams } from "./types";
+import type {
+  AnimationParams,
+  BowlParams,
+  ExportFormat,
+  PartAnalysis,
+  PartFaceSelection,
+  PartTopFace,
+} from "./types";
 
 type NumericParamKey = {
   [K in keyof BowlParams]: BowlParams[K] extends number ? K : never;
 }[keyof BowlParams];
 
+type NumericAnimationParamKey = {
+  [K in keyof AnimationParams]: AnimationParams[K] extends number ? K : never;
+}[keyof AnimationParams];
+
 function App() {
   const [params, setParams] = useState<BowlParams>(defaultParams);
+  const [animationParams, setAnimationParams] = useState<AnimationParams>(defaultAnimationParams);
   const [analysis, setAnalysis] = useState<PartAnalysis | null>(null);
   const [partObject, setPartObject] = useState<THREE.Object3D | null>(null);
+  const [selectedFace, setSelectedFace] = useState<PartFaceSelection | null>(null);
   const [exportFormat, setExportFormat] = useState<ExportFormat>("stl");
   const [status, setStatus] = useState("等待导入零件，或直接调整参数生成振动盘。");
   const [isLoading, setIsLoading] = useState(false);
   const warnings = useMemo(() => validateParams(params), [params]);
+  const effectiveAmplitude = Math.round(animationParams.amplitude * (animationParams.voltage / 220) * 10) / 10;
+  const previewSpeed = Math.round((animationParams.frequency / 50) * animationParams.speed * 100) / 100;
+  const feedRate = Math.round(getVibrationFeedRate(animationParams));
+  const physicsState = useMemo(() => {
+    if (!analysis) return "等待零件";
+
+    const envelope = getAnalysisEnvelope(analysis, params.partTopFace);
+    const constraints = getMotionConstraints(params, envelope);
+    if (!constraints.canEnterTrack) return "轨道卡料";
+    if (!constraints.canExit) return "出口卡料";
+    return "可送料";
+  }, [analysis, params]);
 
   const updateNumber = (key: NumericParamKey, value: number) => {
     setParams((current) => ({
       ...current,
       [key]: Number.isFinite(value) ? value : current[key],
     }));
+  };
+
+  const updateAnimationNumber = (key: NumericAnimationParamKey, value: number) => {
+    setAnimationParams((current) => ({
+      ...current,
+      [key]: Number.isFinite(value) ? value : current[key],
+    }));
+  };
+
+  const handleFaceSelected = (selection: PartFaceSelection) => {
+    setSelectedFace(selection);
+    setParams((current) => ({
+      ...current,
+      partTopFace: selection.axis,
+    }));
+    setStatus(`${selection.label} 已设为零件朝上面，主预览已按该姿态摆放。`);
+  };
+
+  const handleTopFaceChange = (axis: PartTopFace) => {
+    const selection = createFaceSelectionFromAxis(axis);
+    setSelectedFace(selection);
+    setParams((current) => ({
+      ...current,
+      partTopFace: axis,
+    }));
+    setStatus(selection ? `${selection.label} 已设为零件朝上面。` : "已取消指定零件朝上面。");
   };
 
   const handleFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -47,11 +100,15 @@ function App() {
 
     try {
       const parsed = await parsePartFile(file);
-      const recommended = buildRecommendedParams(parsed.analysis, params);
+      const recommended = buildRecommendedParams(parsed.analysis, {
+        ...params,
+        partTopFace: "auto",
+      });
       setPartObject(parsed.object);
       setAnalysis(parsed.analysis);
+      setSelectedFace(null);
       setParams(recommended);
-      setStatus("已完成零件几何分析，并生成推荐振动盘参数。");
+      setStatus("已完成零件几何分析，并生成推荐振动盘参数，可在左上角预览中点击零件面设为朝上。");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "模型解析失败，请检查文件格式。");
     } finally {
@@ -62,7 +119,7 @@ function App() {
 
   const applyRecommendation = () => {
     if (!analysis) {
-      setStatus("请先导入 STL 或 OBJ 零件模型，再应用推荐参数。");
+      setStatus("请先导入 STL、OBJ 或 STEP 零件模型，再应用推荐参数。");
       return;
     }
 
@@ -72,6 +129,8 @@ function App() {
 
   const resetParams = () => {
     setParams(defaultParams);
+    setAnimationParams(defaultAnimationParams);
+    setSelectedFace(null);
     setStatus("已恢复默认振动盘参数。");
   };
 
@@ -139,12 +198,12 @@ function App() {
             <label className={isLoading ? "upload-zone is-loading" : "upload-zone"}>
               <input
                 type="file"
-                accept=".stl,.obj"
+                accept=".stl,.obj,.step,.stp"
                 onChange={handleFileChange}
                 disabled={isLoading}
               />
               <Box size={30} />
-              <strong>{isLoading ? "解析中" : "选择 STL / OBJ 文件"}</strong>
+              <strong>{isLoading ? "解析中" : "选择 STL / OBJ / STEP 文件"}</strong>
               <span>模型只在本机读取，不上传网络</span>
             </label>
             <p className="status-line">{status}</p>
@@ -176,6 +235,10 @@ function App() {
                   <div>
                     <dt>推荐方向</dt>
                     <dd>{analysis.recommendedFeedDirection}</dd>
+                  </div>
+                  <div>
+                    <dt>朝上面</dt>
+                    <dd>{selectedFace?.label ?? "未选定"}</dd>
                   </div>
                 </dl>
                 <button type="button" className="full-button" onClick={applyRecommendation}>
@@ -209,7 +272,13 @@ function App() {
         </aside>
 
         <section className="center-stage">
-          <SceneViewport params={params} partObject={partObject} />
+          <SceneViewport
+            params={params}
+            partObject={partObject}
+            selectedFace={selectedFace}
+            animationParams={animationParams}
+            onFaceSelected={handleFaceSelected}
+          />
         </section>
 
         <aside className="side-panel right-panel">
@@ -446,6 +515,112 @@ function App() {
                 <option value="sideUp">侧面朝上</option>
                 <option value="standing">立式出料</option>
               </select>
+            </div>
+
+            <div className="field-group">
+              <label className="field-label">零件朝上面</label>
+              <select
+                className="field-select"
+                value={params.partTopFace}
+                onChange={(event) => handleTopFaceChange(event.target.value as PartTopFace)}
+              >
+                <option value="auto">{getPartTopFaceLabel("auto")}</option>
+                <option value="yPositive">{getPartTopFaceLabel("yPositive")}</option>
+                <option value="yNegative">{getPartTopFaceLabel("yNegative")}</option>
+                <option value="xPositive">{getPartTopFaceLabel("xPositive")}</option>
+                <option value="xNegative">{getPartTopFaceLabel("xNegative")}</option>
+                <option value="zPositive">{getPartTopFaceLabel("zPositive")}</option>
+                <option value="zNegative">{getPartTopFaceLabel("zNegative")}</option>
+              </select>
+            </div>
+          </section>
+
+          <section className="panel-section">
+            <div className="section-title">
+              <RotateCw size={18} />
+              <h2>振动动画</h2>
+            </div>
+
+            <label className="toggle-row">
+              <input
+                type="checkbox"
+                checked={animationParams.enabled}
+                onChange={(event) => setAnimationParams((current) => ({
+                  ...current,
+                  enabled: event.target.checked,
+                }))}
+              />
+              <span>
+                <strong>开启动画</strong>
+                <small>按变压器参数预览振动状态</small>
+              </span>
+            </label>
+
+            <div className="field-grid">
+              <NumberField
+                label="变压器电压"
+                unit="V"
+                value={animationParams.voltage}
+                min={0}
+                max={260}
+                step={5}
+                onChange={(value) => updateAnimationNumber("voltage", value)}
+              />
+              <NumberField
+                label="振动频率"
+                unit="Hz"
+                value={animationParams.frequency}
+                min={10}
+                max={120}
+                step={1}
+                onChange={(value) => updateAnimationNumber("frequency", value)}
+              />
+              <NumberField
+                label="振动幅度"
+                unit="mm"
+                value={animationParams.amplitude}
+                min={0}
+                max={12}
+                step={0.2}
+                onChange={(value) => updateAnimationNumber("amplitude", value)}
+              />
+              <NumberField
+                label="速度倍率"
+                unit="x"
+                value={animationParams.speed}
+                min={0.2}
+                max={3}
+                step={0.1}
+                onChange={(value) => updateAnimationNumber("speed", value)}
+              />
+              <NumberField
+                label="零件数量"
+                unit="个"
+                value={animationParams.partCount}
+                min={1}
+                max={12}
+                step={1}
+                onChange={(value) => updateAnimationNumber("partCount", Math.round(value))}
+              />
+            </div>
+
+            <div className="animation-summary">
+              <span>
+                有效振幅
+                <strong>{effectiveAmplitude} mm</strong>
+              </span>
+              <span>
+                预览速度
+                <strong>{previewSpeed}x</strong>
+              </span>
+              <span>
+                送料速度
+                <strong>{feedRate} mm/s</strong>
+              </span>
+              <span>
+                物理状态
+                <strong>{physicsState}</strong>
+              </span>
             </div>
           </section>
 
