@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import type { AnimationParams, BowlParams } from "../types";
+import { getEffectiveTrackTotalRise } from "./trackClimb";
 
 const TRACK_LEAD_IN_RATIO = 0.08;
 const TWO_PI = Math.PI * 2;
@@ -247,12 +248,7 @@ function getTrackCenterRadius(params: BowlParams, t: number) {
 }
 
 function getEffectiveTotalRise(params: BowlParams) {
-  const requested = params.trackRisePerTurn * params.trackTurns;
-  const maxRise = Math.max(
-    8,
-    params.bowlHeight - params.bottomThickness - params.trackThickness - params.guardHeight - 4,
-  );
-  return Math.min(requested, maxRise);
+  return getEffectiveTrackTotalRise(params);
 }
 
 function getTrackThicknessAt(t: number, thickness: number) {

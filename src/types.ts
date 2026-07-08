@@ -25,6 +25,7 @@ export interface BowlParams {
   trackTurns: number;
   trackWidth: number;
   trackThickness: number;
+  trackClimbAngleDeg: number;
   trackRisePerTurn: number;
   guardHeight: number;
   outletWidth: number;
@@ -72,13 +73,14 @@ export const defaultParams: BowlParams = {
   bowlDiameter: 420,
   bowlLength: 460,
   bowlWidth: 460,
-  bowlHeight: 150,
+  bowlHeight: 260,
   wallThickness: 4,
   bottomThickness: 8,
   trackTurns: 2.5,
   trackWidth: 42,
   trackThickness: 6,
-  trackRisePerTurn: 26,
+  trackClimbAngleDeg: 3.5,
+  trackRisePerTurn: 70,
   guardHeight: 24,
   outletWidth: 48,
   outletHeight: 34,

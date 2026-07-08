@@ -16,6 +16,7 @@ import { SceneViewport } from "./components/SceneViewport";
 import { createFaceSelectionFromAxis, getPartTopFaceLabel } from "./components/PartFacePreview";
 import { getMotionConstraints, getVibrationFeedRate } from "./geometry/bowlMotion";
 import { buildRecommendedParams, getAnalysisEnvelope, parsePartFile, validateParams } from "./geometry/partAnalysis";
+import { getTrackRisePerTurn } from "./geometry/trackClimb";
 import { exportBowl } from "./geometry/vibratoryBowl";
 import { defaultAnimationParams, defaultParams } from "./types";
 import type {
@@ -60,8 +61,10 @@ function App() {
 
   const updateNumber = (key: NumericParamKey, value: number) => {
     setParams((current) => ({
-      ...current,
-      [key]: Number.isFinite(value) ? value : current[key],
+      ...normalizeClimbParams({
+        ...current,
+        [key]: Number.isFinite(value) ? value : current[key],
+      }),
     }));
   };
 
@@ -433,13 +436,13 @@ function App() {
                 onChange={(value) => updateNumber("trackThickness", value)}
               />
               <NumberField
-                label="每圈上升"
-                unit="mm"
-                value={params.trackRisePerTurn}
-                min={4}
-                max={90}
-                step={2}
-                onChange={(value) => updateNumber("trackRisePerTurn", value)}
+                label="爬升角度"
+                unit="°"
+                value={params.trackClimbAngleDeg}
+                min={1}
+                max={12}
+                step={0.5}
+                onChange={(value) => updateNumber("trackClimbAngleDeg", value)}
               />
               <NumberField
                 label="挡边高度"
@@ -713,3 +716,16 @@ function NumberField({ label, value, min, max, step, unit, onChange }: NumberFie
 }
 
 export default App;
+
+function normalizeClimbParams(params: BowlParams): BowlParams {
+  const risePerTurn = roundToStep(getTrackRisePerTurn(params), 5);
+
+  return {
+    ...params,
+    trackRisePerTurn: risePerTurn,
+  };
+}
+
+function roundToStep(value: number, step: number) {
+  return Math.round(value / step) * step;
+}

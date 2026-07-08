@@ -2,6 +2,7 @@ import * as THREE from "three";
 import { OBJExporter } from "three/examples/jsm/exporters/OBJExporter.js";
 import { STLExporter } from "three/examples/jsm/exporters/STLExporter.js";
 import type { BowlParams, ExportFormat } from "../types";
+import { getEffectiveTrackTotalRise } from "./trackClimb";
 
 const TRACK_FLOOR_OVERLAP = 0.8;
 const TRACK_LEAD_IN_RATIO = 0.08;
@@ -672,12 +673,7 @@ function createSpiralWallGeometry(params: BowlParams, guardThickness: number) {
 }
 
 function getEffectiveTotalRise(params: BowlParams) {
-  const requested = params.trackRisePerTurn * params.trackTurns;
-  const maxRise = Math.max(
-    8,
-    params.bowlHeight - params.bottomThickness - params.trackThickness - params.guardHeight - 4,
-  );
-  return Math.min(requested, maxRise);
+  return getEffectiveTrackTotalRise(params);
 }
 
 function getTrackThicknessAt(t: number, thickness: number) {

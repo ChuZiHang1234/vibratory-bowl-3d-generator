@@ -7,6 +7,14 @@ import { defaultParams } from "../types";
 import type { BowlParams, PartAnalysis, PartTopFace } from "../types";
 import { getMotionConstraints } from "./bowlMotion";
 import type { PhysicalEnvelope } from "./bowlMotion";
+import {
+  getEffectiveTrackClimbAngleDeg,
+  getEffectiveTrackTotalRise,
+  getRequiredBowlHeightForTrackClimb,
+  getRequestedTrackTotalRise,
+  getTrackClimbAngleDeg,
+  getTrackRisePerTurn,
+} from "./trackClimb";
 
 type OcctMesh = {
   name?: string;
@@ -215,14 +223,25 @@ function createRecommendedCandidate(
 ): BowlParams {
   const bowlDiameter = getRecommendedBowlDiameter(envelope, trackWidth, current, diameterPadding);
   const trackTurns = clamp(roundToStep(Math.max(1.5, bowlDiameter / 180), 0.5), 1.5, 5);
-  const risePerTurn = roundToStep(Math.max(16, envelope.height * 1.15 + 10), 5);
+  const trackClimbAngleDeg = roundToStep(Math.max(current.trackClimbAngleDeg || 0, 3.5), 0.5);
   const guardHeight = roundToStep(Math.max(18, envelope.height * 0.65 + 12), 2);
-  const totalRise = trackTurns * risePerTurn;
+  const climbCandidate: BowlParams = {
+    ...current,
+    shape: "round",
+    bowlDiameter,
+    bowlLength: bowlDiameter,
+    bowlWidth: bowlDiameter,
+    trackTurns,
+    trackWidth,
+    guardHeight,
+    trackClimbAngleDeg,
+  };
+  const risePerTurn = roundToStep(getTrackRisePerTurn(climbCandidate), 5);
   const bowlHeight = roundToStep(
     Math.max(
       120,
       envelope.height * 4.5 + 70,
-      totalRise + guardHeight + current.bottomThickness + current.trackThickness + 28,
+      getRequiredBowlHeightForTrackClimb(climbCandidate),
     ),
     10,
   );
@@ -240,6 +259,7 @@ function createRecommendedCandidate(
     bowlHeight,
     trackTurns,
     trackWidth,
+    trackClimbAngleDeg,
     trackRisePerTurn: risePerTurn,
     guardHeight,
     outletWidth: roundToStep(Math.max(trackWidth + 8, envelope.width + 16), 2),
@@ -324,6 +344,8 @@ export function validateParams(params: BowlParams): string[] {
     : radius;
   const neededRadius = params.wallThickness + params.trackWidth + 28;
   const totalRise = params.trackRisePerTurn * params.trackTurns;
+  const requestedRise = getRequestedTrackTotalRise(params);
+  const effectiveRise = getEffectiveTrackTotalRise(params);
 
   if (params.shape === "round" && minimumProfileRadius < neededRadius) {
     warnings.push("圆盘底部空间偏小，轨道宽度和挡边可能放不下。");
@@ -331,6 +353,12 @@ export function validateParams(params: BowlParams): string[] {
 
   if (totalRise + params.guardHeight + params.bottomThickness > params.bowlHeight) {
     warnings.push("轨道总爬升接近或超过盘体高度，已在预览中自动压缩。");
+  }
+
+  if (requestedRise - effectiveRise > 1) {
+    warnings.push(
+      `盘体高度不足，实际爬升角约 ${round(getEffectiveTrackClimbAngleDeg(params))}°，低于设定 ${getTrackClimbAngleDeg(params)}°。`,
+    );
   }
 
   if (params.outletWidth < params.trackWidth) {
