@@ -1,6 +1,8 @@
 import { useEffect, useRef } from "react";
+import { Box, Maximize2, MousePointer2, RotateCw, Ruler, ZoomIn } from "lucide-react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import type { AnimationParams, BowlParams, PartFaceSelection } from "../types";
 import {
   clampMotionDistance,
@@ -23,8 +25,10 @@ interface SceneViewportProps {
 interface AnimatedPartMotion {
   constraints: ReturnType<typeof getMotionConstraints>;
   distance: number;
+  faceGuideQuaternion: THREE.Quaternion | null;
   forwardAxis: "x" | "z";
   group: THREE.Group;
+  initialSize: THREE.Vector3;
   instances: AnimatedPartInstance[];
   lastElapsed: number | null;
   params: BowlParams;
@@ -33,9 +37,12 @@ interface AnimatedPartMotion {
 
 interface AnimatedPartInstance {
   group: THREE.Group;
+  object: THREE.Object3D;
   offsetDistance: number;
   pathIndex: number | null;
   reservoirIndex: number | null;
+  reservoirRoll: number;
+  reservoirYaw: number;
 }
 
 export function SceneViewport({
@@ -70,40 +77,58 @@ export function SceneViewport({
     if (!mountRef.current) return;
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0xe9edf1);
+    scene.background = new THREE.Color(0x101821);
 
-    const camera = new THREE.PerspectiveCamera(42, 1, 1, 12000);
-    camera.position.set(720, 470, 780);
+    const camera = new THREE.PerspectiveCamera(39, 1, 1, 24000);
+    camera.position.set(720, 650, 780);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 0.94;
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     mountRef.current.appendChild(renderer.domElement);
 
+    const pmrem = new THREE.PMREMGenerator(renderer);
+    const environment = pmrem.fromScene(new RoomEnvironment(), 0.05).texture;
+    scene.environment = environment;
+    pmrem.dispose();
+
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.target.set(0, 120, 0);
-    controls.maxDistance = 9000;
+    controls.maxDistance = 18000;
     controls.minDistance = 40;
 
-    scene.add(new THREE.HemisphereLight(0xffffff, 0xa9b1ba, 2.6));
-    const keyLight = new THREE.DirectionalLight(0xffffff, 2.4);
-    keyLight.position.set(400, 700, 300);
+    scene.add(new THREE.HemisphereLight(0xf7fbff, 0x3d4852, 2.55));
+    const keyLight = new THREE.DirectionalLight(0xffffff, 2.15);
+    keyLight.position.set(520, 760, 260);
     keyLight.castShadow = true;
+    keyLight.shadow.mapSize.set(2048, 2048);
     scene.add(keyLight);
 
-    const fillLight = new THREE.DirectionalLight(0xbdd7ff, 1.2);
-    fillLight.position.set(-420, 320, -360);
+    const fillLight = new THREE.DirectionalLight(0xcee3ff, 1.75);
+    fillLight.position.set(-520, 340, -420);
     scene.add(fillLight);
 
-    const grid = new THREE.GridHelper(2400, 24, 0x9aa4ae, 0xc6ccd3);
+    const rimLight = new THREE.DirectionalLight(0xffffff, 0.85);
+    rimLight.position.set(-260, 520, 780);
+    scene.add(rimLight);
+
+    const frontStripLight = new THREE.RectAreaLight(0xffffff, 2.4, 760, 120);
+    frontStripLight.position.set(0, 520, 520);
+    frontStripLight.lookAt(0, 80, 0);
+    scene.add(frontStripLight);
+
+    const grid = new THREE.GridHelper(2400, 24, 0x3b5b65, 0x233744);
     grid.position.y = -0.5;
     scene.add(grid);
 
     const floor = new THREE.Mesh(
       new THREE.PlaneGeometry(5000, 5000),
-      new THREE.ShadowMaterial({ color: 0x83909b, opacity: 0.16 }),
+      new THREE.ShadowMaterial({ color: 0x071019, opacity: 0.28 }),
     );
     floor.rotation.x = -Math.PI / 2;
     floor.receiveShadow = true;
@@ -158,6 +183,7 @@ export function SceneViewport({
         cancelAnimationFrame(current.frame);
         observer.disconnect();
         current.controls.dispose();
+        current.scene.environment?.dispose();
         current.renderer.dispose();
         current.renderer.domElement.remove();
       }
@@ -200,26 +226,107 @@ export function SceneViewport({
     current.controls.update();
   }, [params, partObject, selectedFace, animationParams.partCount]);
 
+  const fitView = () => {
+    const current = sceneRef.current;
+    if (!current) return;
+
+    const box = new THREE.Box3().setFromObject(current.previewRoot);
+    if (box.isEmpty()) return;
+
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const radius = Math.max(size.x, size.y, size.z, 1);
+    const distance = radius * 1.35;
+    current.controls.target.copy(center);
+    current.camera.position.copy(center).add(new THREE.Vector3(0.82, 0.62, 0.9).normalize().multiplyScalar(distance));
+    current.camera.updateProjectionMatrix();
+    current.controls.update();
+  };
+
+  const setCameraView = (view: "iso" | "top" | "side") => {
+    const current = sceneRef.current;
+    if (!current) return;
+
+    const target = current.controls.target.clone();
+    const distance = current.camera.position.distanceTo(target);
+    const direction = view === "top"
+      ? new THREE.Vector3(0.001, 1, 0.001)
+      : view === "side"
+        ? new THREE.Vector3(1, 0.32, 0.04)
+        : new THREE.Vector3(0.82, 0.62, 0.9);
+
+    current.camera.position.copy(target).add(direction.normalize().multiplyScalar(Math.max(distance, 420)));
+    current.camera.lookAt(target);
+    current.camera.updateProjectionMatrix();
+    current.controls.update();
+  };
+
+  const orbitStep = () => {
+    const current = sceneRef.current;
+    if (!current) return;
+
+    const target = current.controls.target;
+    const offset = current.camera.position.clone().sub(target);
+    offset.applyAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 7);
+    current.camera.position.copy(target).add(offset);
+    current.camera.lookAt(target);
+    current.controls.update();
+  };
+
+  const zoomIn = () => {
+    const current = sceneRef.current;
+    if (!current) return;
+
+    const target = current.controls.target;
+    const offset = current.camera.position.clone().sub(target).multiplyScalar(0.78);
+    current.camera.position.copy(target).add(offset);
+    current.controls.update();
+  };
+
   return (
     <div className="viewport-shell">
       <div ref={mountRef} className="viewport-canvas" />
+      <div className="viewport-toolbar" aria-label="视图工具">
+        <button type="button" title="等轴测视图" onClick={() => setCameraView("iso")}>
+          <MousePointer2 size={15} />
+        </button>
+        <button type="button" title="旋转视图" onClick={orbitStep}>
+          <RotateCw size={15} />
+        </button>
+        <button type="button" title="放大视图" onClick={zoomIn}>
+          <ZoomIn size={15} />
+        </button>
+        <button type="button" title="俯视轨道" onClick={() => setCameraView("top")}>
+          <Ruler size={15} />
+        </button>
+        <button type="button" title="适合窗口" onClick={fitView}>
+          <Maximize2 size={15} />
+        </button>
+      </div>
       <PartFacePreview
         partObject={partObject}
         selection={selectedFace}
         onSelect={onFaceSelected}
       />
+      <div className="view-cube" aria-hidden="true">
+        <Box size={16} />
+        <span>TOP</span>
+      </div>
+      <div className="viewport-axis" aria-hidden="true">
+        <span className="axis-y">Y</span>
+        <span className="axis-x">X</span>
+        <span className="axis-z">Z</span>
+      </div>
       <div className="viewport-hint">鼠标左键旋转 · 滚轮缩放 · 右键平移</div>
     </div>
   );
 }
 
-function orientPartFaceToUp(object: THREE.Object3D, selection: PartFaceSelection) {
+function getFaceUprightQuaternion(selection: PartFaceSelection) {
   const normal = new THREE.Vector3(...selection.normal).normalize();
-  if (normal.lengthSq() < 0.000001) return;
+  if (normal.lengthSq() < 0.000001) return null;
 
-  const quaternion = new THREE.Quaternion().setFromUnitVectors(normal, new THREE.Vector3(0, 1, 0));
-  object.applyQuaternion(quaternion);
-  object.updateMatrixWorld(true);
+  return new THREE.Quaternion().setFromUnitVectors(normal, new THREE.Vector3(0, 1, 0));
 }
 
 function createAnimatedPartMotion(
@@ -228,8 +335,12 @@ function createAnimatedPartMotion(
   params: BowlParams,
   partCount: number,
 ): AnimatedPartMotion {
-  const sample = createCenteredPartClone(partObject, selectedFace);
-  const box = new THREE.Box3().setFromObject(sample);
+  const faceGuideQuaternion = selectedFace ? getFaceUprightQuaternion(selectedFace) : null;
+  const initialSample = createCenteredPartClone(partObject);
+  const initialBox = new THREE.Box3().setFromObject(initialSample);
+  const initialSize = initialBox.getSize(new THREE.Vector3());
+  const guidedSample = createGuidedPartSample(partObject, faceGuideQuaternion);
+  const box = new THREE.Box3().setFromObject(guidedSample);
   const size = box.getSize(new THREE.Vector3());
   const forwardAxis = size.x >= size.z ? "x" : "z";
   const envelope = getPhysicalEnvelope(size, forwardAxis);
@@ -237,27 +348,29 @@ function createAnimatedPartMotion(
   const group = new THREE.Group();
   const count = THREE.MathUtils.clamp(Math.round(partCount), 1, 12);
   const pathLength = getBowlMotionPathLength(params);
-  const availablePathLength = constraints.canExit ? pathLength : constraints.maxDistance;
+  const canCompletePath = canCompleteMotionPath(constraints);
+  const availablePathLength = canCompletePath ? pathLength : constraints.maxDistance;
   const pathCapacity = constraints.canEnterTrack
     ? Math.max(1, Math.floor(availablePathLength / constraints.minimumSpacing) + 1)
     : 0;
   const pathCount = Math.min(count, pathCapacity);
   const spacing = pathCount > 0
-    ? constraints.canExit
+    ? canCompletePath
       ? Math.max(pathLength / pathCount, constraints.minimumSpacing)
       : constraints.minimumSpacing
     : constraints.minimumSpacing;
   const instances: AnimatedPartInstance[] = [];
 
-  sample.name = "送料动画零件-1";
-  const firstCarrier = createPartCarrier(sample, 0, pathCount > 0 ? 0 : null, pathCount > 0 ? null : 0);
+  const firstObject = createCenteredPartClone(partObject);
+  firstObject.name = "送料动画零件-1";
+  const firstCarrier = createPartCarrier(firstObject, 0, pathCount > 0 ? 0 : null, pathCount > 0 ? null : 0);
   instances.push(firstCarrier);
   group.add(firstCarrier.group);
 
   for (let index = 1; index < count; index += 1) {
-    const clone = createCenteredPartClone(partObject, selectedFace);
-    clone.name = `送料动画零件-${index + 1}`;
     const onPath = index < pathCount;
+    const clone = createCenteredPartClone(partObject);
+    clone.name = `送料动画零件-${index + 1}`;
     const reservoirIndex = onPath ? null : index - pathCount;
     const carrier = createPartCarrier(clone, spacing * index, onPath ? index : null, reservoirIndex);
     instances.push(carrier);
@@ -269,8 +382,10 @@ function createAnimatedPartMotion(
   return {
     constraints,
     distance: 0,
+    faceGuideQuaternion,
     forwardAxis,
     group,
+    initialSize,
     instances,
     lastElapsed: null,
     params,
@@ -278,7 +393,7 @@ function createAnimatedPartMotion(
   };
 }
 
-function createCenteredPartClone(partObject: THREE.Object3D, selectedFace: PartFaceSelection | null) {
+function createCenteredPartClone(partObject: THREE.Object3D) {
   const clone = partObject.clone(true);
   clone.traverse((child) => {
     if ((child as THREE.Mesh).isMesh) {
@@ -287,16 +402,25 @@ function createCenteredPartClone(partObject: THREE.Object3D, selectedFace: PartF
     }
   });
 
-  if (selectedFace) {
-    orientPartFaceToUp(clone, selectedFace);
-  }
-
-  clone.updateMatrixWorld(true);
-  const box = new THREE.Box3().setFromObject(clone);
-  const center = box.getCenter(new THREE.Vector3());
-  clone.position.sub(center);
-  clone.updateMatrixWorld(true);
+  centerObjectAtOrigin(clone);
   return clone;
+}
+
+function createGuidedPartSample(partObject: THREE.Object3D, faceGuideQuaternion: THREE.Quaternion | null) {
+  const clone = createCenteredPartClone(partObject);
+  if (faceGuideQuaternion) {
+    clone.applyQuaternion(faceGuideQuaternion);
+    centerObjectAtOrigin(clone);
+  }
+  return clone;
+}
+
+function centerObjectAtOrigin(object: THREE.Object3D) {
+  object.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(object);
+  const center = box.getCenter(new THREE.Vector3());
+  object.position.sub(center);
+  object.updateMatrixWorld(true);
 }
 
 function getPhysicalEnvelope(size: THREE.Vector3, forwardAxis: "x" | "z") {
@@ -317,9 +441,12 @@ function createPartCarrier(
   group.add(partObject);
   return {
     group,
+    object: partObject,
     offsetDistance,
     pathIndex,
     reservoirIndex,
+    reservoirRoll: reservoirIndex === null ? 0 : seededNoise(reservoirIndex, 13) * Math.PI * 1.35,
+    reservoirYaw: reservoirIndex === null ? 0 : seededNoise(reservoirIndex, 31) * Math.PI * 2,
   };
 }
 
@@ -349,40 +476,57 @@ function updateAnimatedPart(
 }
 
 function updatePartInstances(motion: AnimatedPartMotion) {
+  const canCompletePath = canCompleteMotionPath(motion.constraints);
+
   motion.instances.forEach((instance) => {
     if (instance.pathIndex === null) {
-      applyReservoirPose(instance.group, motion, instance.reservoirIndex ?? 0);
+      applyReservoirPose(instance, motion);
       return;
     }
 
-    const desiredDistance = motion.constraints.canExit
+    const desiredDistance = canCompletePath
       ? motion.distance + instance.offsetDistance
       : motion.constraints.maxDistance - instance.pathIndex * motion.constraints.minimumSpacing;
     const physicalDistance = clampMotionDistance(desiredDistance, motion.constraints);
     const pose = getBowlMotionPose(motion.params, physicalDistance);
-    applyPartPose(instance.group, motion, pose);
+    applyPartPose(instance, motion, pose);
   });
 }
 
-function applyReservoirPose(group: THREE.Group, motion: AnimatedPartMotion, index: number) {
+function canCompleteMotionPath(constraints: ReturnType<typeof getMotionConstraints>) {
+  return constraints.canEnterTrack && constraints.canPassGuide && constraints.canExit;
+}
+
+function applyReservoirPose(instance: AnimatedPartInstance, motion: AnimatedPartMotion) {
+  const group = instance.group;
+  const index = instance.reservoirIndex ?? 0;
   const pose = getReservoirPose(motion.params, motion.size, index);
+  instance.object.quaternion.identity();
   group.position.copy(pose.position);
   group.quaternion.copy(getTravelQuaternion(pose.tangent, motion.forwardAxis));
+  group.rotateY(instance.reservoirYaw);
+  group.rotateX(instance.reservoirRoll);
 }
 
 function applyPartPose(
-  group: THREE.Group,
+  instance: AnimatedPartInstance,
   motion: AnimatedPartMotion,
   pose: ReturnType<typeof getBowlMotionPose>,
 ) {
+  const group = instance.group;
+  const faceGuideProgress = motion.faceGuideQuaternion ? pose.guideProgress : 0;
+  const activeSize = getGuidedSizeAtProgress(motion, faceGuideProgress);
   const outletRollProgress = getOutletRollProgress(pose.outletProgress);
-  const verticalLift = getOutletPoseLift(motion.params, motion.size, motion.forwardAxis, outletRollProgress);
+  const verticalLift = getOutletPoseLift(motion.params, activeSize, motion.forwardAxis, outletRollProgress);
+
+  applyFaceGuidePose(instance.object, motion.faceGuideQuaternion, faceGuideProgress);
 
   group.position.set(
     pose.position.x,
-    pose.position.y + motion.size.y / 2 + verticalLift,
+    pose.position.y + activeSize.y / 2 + verticalLift,
     pose.position.z,
   );
+  applyLaneBoundaryCorrection(group, motion, pose, activeSize);
   group.quaternion.copy(getTravelQuaternion(pose.tangent, motion.forwardAxis));
 
   const outletRoll = getOutletPoseRoll(motion.params, outletRollProgress);
@@ -393,6 +537,51 @@ function applyPartPose(
       group.rotateZ(outletRoll);
     }
   }
+}
+
+function applyLaneBoundaryCorrection(
+  group: THREE.Group,
+  motion: AnimatedPartMotion,
+  pose: ReturnType<typeof getBowlMotionPose>,
+  activeSize: THREE.Vector3,
+) {
+  const laneHalfWidth = Math.max(0, pose.laneWidth / 2);
+  const partHalfWidth = getPartLaneWidth(activeSize, motion.forwardAxis) / 2;
+  const availableCenterOffset = Math.max(0, laneHalfWidth - partHalfWidth - 1);
+  const clampedOffset = THREE.MathUtils.clamp(
+    pose.laneCenterOffset,
+    -availableCenterOffset,
+    availableCenterOffset,
+  );
+  const correction = clampedOffset - pose.laneCenterOffset;
+
+  if (Math.abs(correction) > 0.001) {
+    group.position.add(pose.sideAxis.clone().multiplyScalar(correction));
+  }
+}
+
+function getPartLaneWidth(size: THREE.Vector3, forwardAxis: "x" | "z") {
+  return forwardAxis === "x" ? size.z : size.x;
+}
+
+function applyFaceGuidePose(
+  object: THREE.Object3D,
+  targetQuaternion: THREE.Quaternion | null,
+  guideProgress: number,
+) {
+  object.quaternion.identity();
+  if (!targetQuaternion) return;
+
+  object.quaternion.slerp(targetQuaternion, smoothstep(THREE.MathUtils.clamp(guideProgress, 0, 1)));
+}
+
+function getGuidedSizeAtProgress(motion: AnimatedPartMotion, guideProgress: number) {
+  const t = smoothstep(THREE.MathUtils.clamp(guideProgress, 0, 1));
+  return new THREE.Vector3(
+    THREE.MathUtils.lerp(motion.initialSize.x, motion.size.x, t),
+    THREE.MathUtils.lerp(motion.initialSize.y, motion.size.y, t),
+    THREE.MathUtils.lerp(motion.initialSize.z, motion.size.z, t),
+  );
 }
 
 function getTravelQuaternion(tangent: THREE.Vector3, forwardAxis: "x" | "z") {
@@ -503,4 +692,9 @@ function resetMotion(root: THREE.Group) {
 
 function smoothstep(t: number) {
   return t * t * (3 - 2 * t);
+}
+
+function seededNoise(index: number, salt: number) {
+  const value = Math.sin(index * 12.9898 + salt * 78.233) * 43758.5453;
+  return value - Math.floor(value);
 }

@@ -173,17 +173,18 @@ export function buildRecommendedParams(
   const envelope = getAnalysisEnvelope(analysis, current.partTopFace);
   const wallThickness = current.wallThickness || defaultParams.wallThickness;
   const trackThickness = current.trackThickness || defaultParams.trackThickness;
-  const lateralClearance = Math.max(8, Math.min(18, envelope.width * 0.18));
-  let trackWidth = roundToStep(
+  const fitClearance = getPartFitClearance(envelope);
+  const fittedLaneWidth = getFittedLaneWidth(envelope, fitClearance);
+  let trackWidth = ceilToStep(
     Math.max(
-      defaultParams.trackWidth,
-      envelope.width + lateralClearance * 2 + wallThickness * 1.5,
-      envelope.width * 1.3,
+      14,
+      fittedLaneWidth + wallThickness * 2.2,
+      envelope.width * 1.12 + wallThickness * 2,
     ),
-    5,
+    2,
   );
-  let outletHeight = roundToStep(
-    Math.max(30, getRequiredOutletPoseHeight(current, envelope) + trackThickness + 10),
+  let outletHeight = ceilToStep(
+    Math.max(12, getRequiredOutletPoseHeight(current, envelope) + trackThickness + fitClearance),
     2,
   );
   let diameterPadding = 0;
@@ -193,8 +194,14 @@ export function buildRecommendedParams(
     const constraints = getMotionConstraints(candidate, envelope);
     let changed = false;
 
-    if (!constraints.canEnterTrack) {
-      const shortage = constraints.requiredLaneWidth - constraints.laneWidth;
+    if (!constraints.canEnterTrack || !constraints.canPassGuide) {
+      const limitingLaneWidth = constraints.canEnterTrack
+        ? constraints.guideLaneWidth
+        : constraints.baseLaneWidth;
+      const requiredWidth = constraints.canEnterTrack
+        ? constraints.requiredGuideLaneWidth
+        : constraints.requiredLaneWidth;
+      const shortage = requiredWidth - limitingLaneWidth;
       trackWidth = roundToStep(trackWidth + Math.max(5, shortage + wallThickness * 1.5), 5);
       diameterPadding += Math.max(10, envelope.length * 0.12);
       changed = true;
@@ -224,7 +231,9 @@ function createRecommendedCandidate(
   const bowlDiameter = getRecommendedBowlDiameter(envelope, trackWidth, current, diameterPadding);
   const trackTurns = clamp(roundToStep(Math.max(1.5, bowlDiameter / 180), 0.5), 1.5, 5);
   const trackClimbAngleDeg = roundToStep(Math.max(current.trackClimbAngleDeg || 0, 3.5), 0.5);
-  const guardHeight = roundToStep(Math.max(18, envelope.height * 0.65 + 12), 2);
+  const fitClearance = getPartFitClearance(envelope);
+  const fittedLaneWidth = getFittedLaneWidth(envelope, fitClearance);
+  const guardHeight = ceilToStep(Math.max(10, envelope.height + fitClearance + 4), 2);
   const climbCandidate: BowlParams = {
     ...current,
     shape: "round",
@@ -262,9 +271,13 @@ function createRecommendedCandidate(
     trackClimbAngleDeg,
     trackRisePerTurn: risePerTurn,
     guardHeight,
-    outletWidth: roundToStep(Math.max(trackWidth + 8, envelope.width + 16), 2),
+    outletWidth: ceilToStep(Math.max(12, fittedLaneWidth), 2),
     outletHeight,
     outletLength: roundToStep(Math.max(110, trackWidth * 2.5, envelope.length * 1.25), 10),
+    partFitClearance: fitClearance,
+    partFitHeight: envelope.height,
+    partFitLength: envelope.length,
+    partFitWidth: envelope.width,
     baseLength,
     baseWidth: baseLength,
     baseHeight: roundToStep(Math.max(60, bowlHeight * 0.42), 10),
@@ -361,8 +374,11 @@ export function validateParams(params: BowlParams): string[] {
     );
   }
 
-  if (params.outletWidth < params.trackWidth) {
-    warnings.push("出料口宽度小于轨道宽度，零件可能卡料。");
+  const fittedOutletWidth = params.partFitWidth && params.partFitClearance
+    ? params.partFitWidth + params.partFitClearance * 2
+    : params.trackWidth;
+  if (params.outletWidth + 0.001 < fittedOutletWidth) {
+    warnings.push("出料口宽度小于零件贴合导向宽度，零件可能卡料。");
   }
 
   if (params.trackWidth <= 0 || params.trackTurns <= 0) {
@@ -467,6 +483,18 @@ function round(value: number) {
 
 function roundToStep(value: number, step: number) {
   return Math.round(value / step) * step;
+}
+
+function ceilToStep(value: number, step: number) {
+  return Math.ceil(value / step) * step;
+}
+
+function getPartFitClearance(envelope: PhysicalEnvelope) {
+  return roundToStep(clamp(envelope.width * 0.12, 1.2, 2.5), 0.1);
+}
+
+function getFittedLaneWidth(envelope: PhysicalEnvelope, clearance: number) {
+  return envelope.width + clearance * 2;
 }
 
 function clamp(value: number, min: number, max: number) {

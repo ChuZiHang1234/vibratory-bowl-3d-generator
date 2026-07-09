@@ -33,6 +33,10 @@ export interface BowlParams {
   outletLength: number;
   outletOrientation: OutletOrientation;
   partTopFace: PartTopFace;
+  partFitClearance?: number;
+  partFitHeight?: number;
+  partFitLength?: number;
+  partFitWidth?: number;
   feedDirection: FeedDirection;
   baseLength: number;
   baseWidth: number;

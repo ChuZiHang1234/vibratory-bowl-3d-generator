@@ -2,9 +2,12 @@ import { ChangeEvent, useMemo, useState } from "react";
 import * as THREE from "three";
 import {
   Box,
+  CheckCircle2,
   Cpu,
   Download,
+  Factory,
   FileWarning,
+  Printer,
   RefreshCw,
   RotateCw,
   Ruler,
@@ -12,6 +15,7 @@ import {
   Upload,
   WifiOff,
 } from "lucide-react";
+import { PartAnalysisPreview } from "./components/PartAnalysisPreview";
 import { SceneViewport } from "./components/SceneViewport";
 import { createFaceSelectionFromAxis, getPartTopFaceLabel } from "./components/PartFacePreview";
 import { getMotionConstraints, getVibrationFeedRate } from "./geometry/bowlMotion";
@@ -29,7 +33,7 @@ import type {
 } from "./types";
 
 type NumericParamKey = {
-  [K in keyof BowlParams]: BowlParams[K] extends number ? K : never;
+  [K in keyof BowlParams]-?: NonNullable<BowlParams[K]> extends number ? K : never;
 }[keyof BowlParams];
 
 type NumericAnimationParamKey = {
@@ -49,15 +53,18 @@ function App() {
   const effectiveAmplitude = Math.round(animationParams.amplitude * (animationParams.voltage / 220) * 10) / 10;
   const previewSpeed = Math.round((animationParams.frequency / 50) * animationParams.speed * 100) / 100;
   const feedRate = Math.round(getVibrationFeedRate(animationParams));
+  const manufacturing = useMemo(() => getManufacturingRecommendation(params, analysis), [params, analysis]);
   const physicsState = useMemo(() => {
     if (!analysis) return "等待零件";
 
     const envelope = getAnalysisEnvelope(analysis, params.partTopFace);
     const constraints = getMotionConstraints(params, envelope);
     if (!constraints.canEnterTrack) return "轨道卡料";
+    if (!constraints.canPassGuide) return "导向卡料";
     if (!constraints.canExit) return "出口卡料";
-    return "可送料";
+    return params.partTopFace === "auto" ? "可送料" : "导向送料";
   }, [analysis, params]);
+  const physicsPassed = physicsState === "可送料" || physicsState === "导向送料";
 
   const updateNumber = (key: NumericParamKey, value: number) => {
     setParams((current) => ({
@@ -75,23 +82,43 @@ function App() {
     }));
   };
 
-  const handleFaceSelected = (selection: PartFaceSelection) => {
+  const setTrackTopFace = (axis: PartTopFace, selection = createFaceSelectionFromAxis(axis)) => {
     setSelectedFace(selection);
-    setParams((current) => ({
-      ...current,
-      partTopFace: selection.axis,
-    }));
-    setStatus(`${selection.label} 已设为零件朝上面，主预览已按该姿态摆放。`);
+    setParams((current) => {
+      const next = {
+        ...current,
+        partTopFace: axis,
+      };
+
+      if (!analysis || axis === "auto") {
+        return next;
+      }
+
+      const recommended = buildRecommendedParams(analysis, next);
+      return {
+        ...next,
+        guardHeight: recommended.guardHeight,
+        outletHeight: recommended.outletHeight,
+        outletLength: recommended.outletLength,
+        outletWidth: recommended.outletWidth,
+        partFitClearance: recommended.partFitClearance,
+        partFitHeight: recommended.partFitHeight,
+        partFitLength: recommended.partFitLength,
+        partFitWidth: recommended.partFitWidth,
+        trackWidth: recommended.trackWidth,
+      };
+    });
+    return selection;
+  };
+
+  const handleFaceSelected = (selection: PartFaceSelection) => {
+    setTrackTopFace(selection.axis, selection);
+    setStatus(`${selection.label} 已设为轨道爬升面，轨道导向间隙已按该面更新。`);
   };
 
   const handleTopFaceChange = (axis: PartTopFace) => {
-    const selection = createFaceSelectionFromAxis(axis);
-    setSelectedFace(selection);
-    setParams((current) => ({
-      ...current,
-      partTopFace: axis,
-    }));
-    setStatus(selection ? `${selection.label} 已设为零件朝上面。` : "已取消指定零件朝上面。");
+    const selection = setTrackTopFace(axis);
+    setStatus(selection ? `${selection.label} 已设为轨道爬升面，轨道导向间隙已按该面更新。` : "已取消指定轨道爬升面。");
   };
 
   const handleFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -111,7 +138,7 @@ function App() {
       setAnalysis(parsed.analysis);
       setSelectedFace(null);
       setParams(recommended);
-      setStatus("已完成零件几何分析，并生成推荐振动盘参数，可在左上角预览中点击零件面设为朝上。");
+      setStatus("已完成零件几何分析，并生成推荐振动盘参数，可在左上角预览中点击零件面设为轨道爬升面。");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "模型解析失败，请检查文件格式。");
     } finally {
@@ -127,7 +154,7 @@ function App() {
     }
 
     setParams((current) => buildRecommendedParams(analysis, current));
-    setStatus("已重新应用推荐参数。");
+    setStatus("已按当前爬升面重新应用推荐参数。");
   };
 
   const resetParams = () => {
@@ -216,19 +243,33 @@ function App() {
             <div className="section-title">
               <Ruler size={18} />
               <h2>零件分析</h2>
+              {analysis && (
+                <span className={physicsPassed ? "section-badge is-ok" : "section-badge is-warn"}>
+                  {physicsPassed ? "通过" : physicsState}
+                </span>
+              )}
             </div>
             {analysis ? (
               <>
-                <div className="analysis-name">{analysis.fileName}</div>
-                <div className="metric-grid">
-                  <Metric label="长度 X" value={analysis.length} unit="mm" />
-                  <Metric label="宽度 Z" value={analysis.width} unit="mm" />
-                  <Metric label="高度 Y" value={analysis.height} unit="mm" />
-                  <Metric
-                    label="体积"
-                    value={analysis.volume ? Math.round(analysis.volume / 1000) : "未闭合"}
-                    unit={analysis.volume ? "cm3" : ""}
-                  />
+                <div className="analysis-file-row">
+                  <span className="analysis-file-name">{analysis.fileName}</span>
+                  <span className="analysis-file-format">{analysis.format}</span>
+                </div>
+                <div className="analysis-report">
+                  <div className="analysis-preview-card">
+                    <PartAnalysisPreview partObject={partObject} />
+                    <span>零件预览</span>
+                  </div>
+                  <div className="analysis-measurements">
+                    <Metric label="长度 X" value={analysis.length} unit="mm" />
+                    <Metric label="宽度 Z" value={analysis.width} unit="mm" />
+                    <Metric label="高度 Y" value={analysis.height} unit="mm" />
+                    <Metric
+                      label="体积"
+                      value={analysis.volume ? Math.round(analysis.volume / 1000) : "未闭合"}
+                      unit={analysis.volume ? "cm3" : ""}
+                    />
+                  </div>
                 </div>
                 <dl className="analysis-list">
                   <div>
@@ -240,7 +281,7 @@ function App() {
                     <dd>{analysis.recommendedFeedDirection}</dd>
                   </div>
                   <div>
-                    <dt>朝上面</dt>
+                    <dt>轨道爬升面</dt>
                     <dd>{selectedFace?.label ?? "未选定"}</dd>
                   </div>
                 </dl>
@@ -259,7 +300,24 @@ function App() {
 
           <section className="panel-section">
             <div className="section-title">
-              <FileWarning size={18} />
+              <Factory size={18} />
+              <h2>制造建议</h2>
+            </div>
+            <div className="manufacturing-card">
+              <div className="manufacturing-icon">
+                {manufacturing.kind === "print" ? <Printer size={18} /> : <Factory size={18} />}
+              </div>
+              <div>
+                <strong>{manufacturing.title}</strong>
+                <p>{manufacturing.description}</p>
+                <span>{manufacturing.process}</span>
+              </div>
+            </div>
+          </section>
+
+          <section className="panel-section">
+            <div className="section-title">
+              {warnings.length > 0 ? <FileWarning size={18} /> : <CheckCircle2 size={18} />}
               <h2>参数检查</h2>
             </div>
             {warnings.length > 0 ? (
@@ -405,7 +463,7 @@ function App() {
           <section className="panel-section">
             <div className="section-title">
               <RotateCw size={18} />
-              <h2>轨道与出料</h2>
+              <h2>轨道爬升与出料</h2>
             </div>
             <div className="field-grid">
               <NumberField
@@ -503,37 +561,39 @@ function App() {
             </div>
 
             <div className="field-group">
-              <label className="field-label">出料姿态</label>
+              <label className="field-label">轨道爬升面</label>
               <select
                 className="field-select"
-                value={params.outletOrientation}
-                onChange={(event) => setParams((current) => ({
-                  ...current,
-                  outletOrientation: event.target.value as BowlParams["outletOrientation"],
-                }))}
-              >
-                <option value="free">不限制</option>
-                <option value="frontUp">正面朝上</option>
-                <option value="backUp">背面朝上</option>
-                <option value="sideUp">侧面朝上</option>
-                <option value="standing">立式出料</option>
-              </select>
-            </div>
-
-            <div className="field-group">
-              <label className="field-label">零件朝上面</label>
-              <select
-                className="field-select"
+                title="决定零件沿螺旋轨道爬升时哪个面朝上"
                 value={params.partTopFace}
                 onChange={(event) => handleTopFaceChange(event.target.value as PartTopFace)}
               >
-                <option value="auto">{getPartTopFaceLabel("auto")}</option>
+                <option value="auto">未选定（按稳定姿态）</option>
                 <option value="yPositive">{getPartTopFaceLabel("yPositive")}</option>
                 <option value="yNegative">{getPartTopFaceLabel("yNegative")}</option>
                 <option value="xPositive">{getPartTopFaceLabel("xPositive")}</option>
                 <option value="xNegative">{getPartTopFaceLabel("xNegative")}</option>
                 <option value="zPositive">{getPartTopFaceLabel("zPositive")}</option>
                 <option value="zNegative">{getPartTopFaceLabel("zNegative")}</option>
+              </select>
+            </div>
+
+            <div className="field-group">
+              <label className="field-label">出口末端处理</label>
+              <select
+                className="field-select"
+                title="只控制出料直段末端，不改变轨道上的爬升面"
+                value={params.outletOrientation}
+                onChange={(event) => setParams((current) => ({
+                  ...current,
+                  outletOrientation: event.target.value as BowlParams["outletOrientation"],
+                }))}
+              >
+                <option value="free">保持轨道爬升面</option>
+                <option value="frontUp">末端正面朝上</option>
+                <option value="backUp">末端背面朝上</option>
+                <option value="sideUp">末端侧面朝上</option>
+                <option value="standing">末端立式出料</option>
               </select>
             </div>
           </section>
@@ -728,4 +788,40 @@ function normalizeClimbParams(params: BowlParams): BowlParams {
 
 function roundToStep(value: number, step: number) {
   return Math.round(value / step) * step;
+}
+
+function getManufacturingRecommendation(params: BowlParams, analysis: PartAnalysis | null) {
+  const maxMachineSize = Math.max(
+    params.bowlDiameter,
+    params.bowlLength,
+    params.bowlWidth,
+    params.baseLength,
+    params.baseWidth,
+  );
+  const partMax = analysis ? Math.max(analysis.length, analysis.width, analysis.height) : 0;
+
+  if (maxMachineSize <= 360 && params.trackWidth <= 70 && partMax <= 80) {
+    return {
+      kind: "print" as const,
+      title: "小型盘可 3D 打印试制",
+      description: "适合先用尼龙、树脂或金属打印验证轨道、姿态和出料逻辑。",
+      process: "建议：打印样机 → 试料 → 再做金属版",
+    };
+  }
+
+  if (maxMachineSize <= 760) {
+    return {
+      kind: "cnc" as const,
+      title: "建议 CNC 铝合金整体加工",
+      description: "尺寸适中时，盘体、轨道和出料口可用铝合金锣出，再做阳极或硬化处理。",
+      process: "建议：CNC 开粗 → 精加工轨道 → 表面处理",
+    };
+  }
+
+  return {
+    kind: "cnc" as const,
+    title: "大尺寸建议分体 CNC / 焊接结构",
+    description: "盘体较大时建议分段加工轨道和出料机构，底座独立做刚性支撑。",
+    process: "建议：分体加工 → 定位装配 → 试料调机",
+  };
 }

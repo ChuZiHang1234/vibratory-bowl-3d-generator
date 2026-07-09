@@ -1,12 +1,19 @@
 import * as THREE from "three";
-import type { AnimationParams, BowlParams } from "../types";
+import type { AnimationParams, BowlParams, PartTopFace } from "../types";
 import { getEffectiveTrackTotalRise } from "./trackClimb";
 
 const TRACK_LEAD_IN_RATIO = 0.08;
+const GUIDE_START_RATIO = TRACK_LEAD_IN_RATIO;
+const GUIDE_HOLD_RATIO = 0.82;
+const GUIDE_END_RATIO = 1;
 const TWO_PI = Math.PI * 2;
 
 export interface BowlMotionPose {
+  guideProgress: number;
+  laneCenterOffset: number;
+  laneWidth: number;
   position: THREE.Vector3;
+  sideAxis: THREE.Vector3;
   tangent: THREE.Vector3;
   outletProgress: number;
   progress: number;
@@ -20,15 +27,20 @@ export interface PhysicalEnvelope {
 }
 
 export interface MotionConstraints {
+  baseLaneWidth: number;
   canEnterTrack: boolean;
   canExit: boolean;
+  canPassGuide: boolean;
   entryDistance: number;
+  guideEntryDistance: number;
+  guideLaneWidth: number;
   laneWidth: number;
   maxDistance: number;
   minimumSpacing: number;
   outletEntryDistance: number;
   outletHeight: number;
   pathLength: number;
+  requiredGuideLaneWidth: number;
   requiredLaneWidth: number;
   requiredOutletHeight: number;
 }
@@ -53,11 +65,19 @@ export function getBowlMotionPose(params: BowlParams, distanceMm: number): BowlM
 
   if (wrappedDistance <= layout.spiralLength) {
     const t = wrappedDistance / layout.spiralLength;
-    const position = getSpiralPosition(params, t);
+    const guideState = getTrackGuideState(params, t);
+    const sideAxis = getSpiralSideAxis(params, t);
+    const position = getSpiralPosition(params, t)
+      .add(new THREE.Vector3(0, guideState.surfaceLift, 0))
+      .add(sideAxis.clone().multiplyScalar(guideState.laneCenterOffset));
     const tangent = getSpiralTangent(params, t);
 
     return {
+      guideProgress: guideState.guideProgress,
+      laneCenterOffset: guideState.laneCenterOffset,
+      laneWidth: guideState.laneWidth,
       position,
+      sideAxis,
       tangent,
       outletProgress: 0,
       progress: wrappedDistance / layout.pathLength,
@@ -67,14 +87,21 @@ export function getBowlMotionPose(params: BowlParams, distanceMm: number): BowlM
 
   const outletDistance = wrappedDistance - layout.spiralLength;
   const outletProgress = THREE.MathUtils.clamp(outletDistance / layout.outletLength, 0, 1);
+  const guideState = getOutletGuideState(params);
+  const sideAxis = getOutletSideAxis(layout.tangent);
   const outletStart = layout.radial.clone().multiplyScalar(layout.trackCenterRadius);
   const position = outletStart
     .clone()
     .add(layout.tangent.clone().multiplyScalar(outletDistance))
-    .setY(layout.outletY);
+    .add(sideAxis.clone().multiplyScalar(guideState.laneCenterOffset))
+    .setY(layout.outletY + guideState.surfaceLift);
 
   return {
+    guideProgress: guideState.guideProgress,
+    laneCenterOffset: guideState.laneCenterOffset,
+    laneWidth: guideState.laneWidth,
     position,
+    sideAxis,
     tangent: layout.tangent.clone(),
     outletProgress,
     progress: wrappedDistance / layout.pathLength,
@@ -96,37 +123,53 @@ export function getMotionConstraints(
 ): MotionConstraints {
   const pathLength = getBowlMotionPathLength(params);
   const bendAllowance = getCurveBendAllowance(params, envelope.length);
-  const laneWidth = params.shape === "round"
-    ? Math.max(1, params.trackWidth - params.wallThickness * 1.5)
-    : Math.max(1, params.bowlWidth - params.wallThickness * 2);
+  const baseLaneWidth = getBaseLaneWidth(params);
+  const guideLaneWidth = getRestrictedGuideLaneWidth(params, baseLaneWidth);
+  const laneWidth = Math.min(baseLaneWidth, guideLaneWidth);
   const outletHeight = Math.max(1, params.outletHeight - params.trackThickness);
-  const widthClearance = Math.max(3, Math.min(8, params.trackWidth * 0.08));
+  const widthClearance = getMotionSideClearance(params);
   const requiredLaneWidth = envelope.width + widthClearance * 2 + bendAllowance;
-  const canEnterTrack = requiredLaneWidth <= laneWidth;
+  const requiredGuideLaneWidth = requiredLaneWidth;
+  const canEnterTrack = requiredLaneWidth <= baseLaneWidth;
+  const canPassGuide = requiredGuideLaneWidth <= guideLaneWidth;
   const requiredOutletHeight = getRequiredOutletPoseHeight(params, envelope);
   const canExit = requiredOutletHeight <= outletHeight;
+  const roundLayout = params.shape === "round" ? getRoundMotionLayout(params) : null;
   const outletEntryDistance = params.shape === "round"
-    ? getRoundMotionLayout(params).spiralLength
+    ? roundLayout?.spiralLength ?? pathLength
     : pathLength * 0.78;
+  const guideEntryDistance = params.shape === "round"
+    ? (roundLayout?.spiralLength ?? pathLength) * GUIDE_START_RATIO
+    : pathLength * 0.18;
   const jamClearance = Math.max(12, envelope.length * 0.35);
   const minimumSpacing = envelope.length + jamClearance;
   const entryDistance = Math.max(0, minimumSpacing * 0.45);
-  const maxDistance = canEnterTrack
-    ? canExit
-      ? pathLength
-      : Math.max(entryDistance, outletEntryDistance - minimumSpacing * 0.35)
-    : Math.max(0, entryDistance * 0.35);
-
-  return {
+  const maxDistance = getConstrainedMaxDistance({
     canEnterTrack,
     canExit,
+    canPassGuide,
     entryDistance,
+    guideEntryDistance,
+    minimumSpacing,
+    outletEntryDistance,
+    pathLength,
+  });
+
+  return {
+    baseLaneWidth,
+    canEnterTrack,
+    canExit,
+    canPassGuide,
+    entryDistance,
+    guideEntryDistance,
+    guideLaneWidth,
     laneWidth,
     maxDistance,
     minimumSpacing,
     outletEntryDistance,
     outletHeight,
     pathLength,
+    requiredGuideLaneWidth,
     requiredLaneWidth,
     requiredOutletHeight,
   };
@@ -142,7 +185,7 @@ function getCurveBendAllowance(params: BowlParams, length: number) {
 export function clampMotionDistance(distanceMm: number, constraints: MotionConstraints) {
   if (constraints.pathLength <= 0) return 0;
 
-  if (constraints.canEnterTrack && constraints.canExit) {
+  if (constraints.canEnterTrack && constraints.canPassGuide && constraints.canExit) {
     return wrapDistance(distanceMm, constraints.pathLength);
   }
 
@@ -170,7 +213,11 @@ function getRectMotionPose(params: BowlParams, distanceMm: number): BowlMotionPo
   const y = params.baseHeight + params.bottomThickness + 2;
 
   return {
+    guideProgress: params.partTopFace === "auto" ? 0 : smootherstep(THREE.MathUtils.clamp((t - 0.12) / 0.82, 0, 1)),
+    laneCenterOffset: 0,
+    laneWidth: getBaseLaneWidth(params),
     position: new THREE.Vector3(x, y, z),
+    sideAxis: new THREE.Vector3(0, 0, 1),
     tangent: new THREE.Vector3(1, 0, 0),
     outletProgress: t > 0.78 ? (t - 0.78) / 0.22 : 0,
     progress: t,
@@ -225,6 +272,14 @@ function getSpiralPosition(params: BowlParams, t: number) {
   return new THREE.Vector3(radius * Math.cos(angle), y, radius * Math.sin(angle));
 }
 
+function getSpiralSideAxis(params: BowlParams, t: number) {
+  const sign = params.feedDirection === "clockwise" ? -1 : 1;
+  const totalAngle = params.trackTurns * TWO_PI;
+  const startAngle = Math.PI * 0.2;
+  const angle = startAngle + sign * totalAngle * t;
+  return new THREE.Vector3(Math.cos(angle), 0, Math.sin(angle)).normalize();
+}
+
 function getSpiralTangent(params: BowlParams, t: number) {
   const sampleStep = 0.003;
   const previous = getSpiralPosition(params, THREE.MathUtils.clamp(t - sampleStep, 0, 1));
@@ -247,6 +302,180 @@ function getTrackCenterRadius(params: BowlParams, t: number) {
   return Math.max(1, getRoundProfileRadius(params, profileRatio) - params.wallThickness - params.trackWidth / 2);
 }
 
+function getTrackGuideState(params: BowlParams, t: number) {
+  const baseLaneWidth = getBaseLaneWidth(params);
+  if (params.partTopFace === "auto") {
+    return createGuideState(0, 0, baseLaneWidth);
+  }
+
+  const finalLaneWidth = getRestrictedGuideLaneWidth(params, baseLaneWidth);
+  const entryLaneWidth = getGuideEntryLaneWidth(params, finalLaneWidth);
+  const guideProgress = smootherstep(THREE.MathUtils.clamp(
+    (t - GUIDE_START_RATIO) / Math.max(0.001, GUIDE_END_RATIO - GUIDE_START_RATIO),
+    0,
+    1,
+  ));
+  const laneNarrowingProgress = smootherstep(THREE.MathUtils.clamp(
+    (t - (GUIDE_START_RATIO + 0.06)) / Math.max(0.001, 0.96 - (GUIDE_START_RATIO + 0.06)),
+    0,
+    1,
+  ));
+  const laneWidth = THREE.MathUtils.lerp(entryLaneWidth, finalLaneWidth, laneNarrowingProgress);
+  const laneCenterOffset = getGuideLaneCenterOffset(params, finalLaneWidth) * guideProgress;
+  const surfaceLift = getGuideSurfaceLift(params) * guideProgress;
+
+  return createGuideState(guideProgress, laneCenterOffset, laneWidth, surfaceLift);
+}
+
+function getOutletGuideState(params: BowlParams) {
+  const baseLaneWidth = getBaseLaneWidth(params);
+  if (params.partTopFace === "auto") {
+    return createGuideState(0, 0, baseLaneWidth);
+  }
+
+  const laneWidth = getRestrictedGuideLaneWidth(params, baseLaneWidth);
+  return createGuideState(
+    1,
+    getGuideLaneCenterOffset(params, laneWidth),
+    laneWidth,
+    getGuideSurfaceLift(params),
+  );
+}
+
+function createGuideState(
+  guideProgress: number,
+  laneCenterOffset: number,
+  laneWidth: number,
+  surfaceLift = 0,
+) {
+  return {
+    guideProgress,
+    laneCenterOffset,
+    laneWidth,
+    surfaceLift,
+  };
+}
+
+function getGuideSurfaceLift(params: BowlParams) {
+  if (params.partTopFace === "auto" || !isSideTopFace(params.partTopFace)) return 0;
+
+  const railThickness = Math.max(4, params.wallThickness);
+  return Math.max(
+    params.trackThickness * 1.15,
+    railThickness * 1.5,
+    getMotionSideClearance(params) * 2.2,
+  ) * 0.58;
+}
+
+function getBaseLaneWidth(params: BowlParams) {
+  return params.shape === "round"
+    ? Math.max(1, params.trackWidth - params.wallThickness * 1.5)
+    : Math.max(1, params.bowlWidth - params.wallThickness * 2);
+}
+
+function getRestrictedGuideLaneWidth(params: BowlParams, baseLaneWidth = getBaseLaneWidth(params)) {
+  if (params.partTopFace === "auto") return baseLaneWidth;
+  return Math.min(baseLaneWidth, getOrientationLaneWidth(params));
+}
+
+function getOrientationLaneWidth(params: BowlParams) {
+  const fittedWidth = getFittedLaneWidth(params);
+  if (fittedWidth !== null) return fittedWidth;
+
+  const railThickness = Math.max(4, params.wallThickness);
+  if (isSideTopFace(params.partTopFace)) {
+    return THREE.MathUtils.clamp(params.trackWidth * 0.46, railThickness * 3.2, params.trackWidth * 0.62);
+  }
+
+  return THREE.MathUtils.clamp(params.trackWidth * 0.72, railThickness * 4.2, params.trackWidth - railThickness * 1.4);
+}
+
+function getGuideEntryLaneWidth(params: BowlParams, laneWidth: number) {
+  if (getFittedLaneWidth(params) !== null) {
+    return Math.min(getBaseLaneWidth(params), laneWidth + Math.max(params.wallThickness * 1.2, 3));
+  }
+
+  const railThickness = Math.max(4, params.wallThickness);
+  return THREE.MathUtils.clamp(
+    Math.max(laneWidth + railThickness * 4, params.trackWidth * 0.86),
+    laneWidth,
+    Math.max(laneWidth, params.trackWidth - railThickness * 1.2),
+  );
+}
+
+function getGuideLaneCenterOffset(params: BowlParams, laneWidth: number) {
+  if (!isSideTopFace(params.partTopFace)) return 0;
+
+  const visibleContactOffset = THREE.MathUtils.clamp(
+    params.partFitWidth ? getMotionSideClearance(params) * 0.8 : params.trackWidth * 0.14,
+    0.4,
+    laneWidth * 0.2,
+  );
+  return getTopFaceSideBias(params.partTopFace) * visibleContactOffset;
+}
+
+function getFittedLaneWidth(params: BowlParams) {
+  if (!params.partFitWidth || params.partFitWidth <= 0) return null;
+  return params.partFitWidth + getMotionSideClearance(params) * 2 + getFittedBendAllowance(params);
+}
+
+function getMotionSideClearance(params: BowlParams) {
+  if (params.partFitClearance && params.partFitClearance > 0) {
+    return params.partFitClearance;
+  }
+
+  return Math.max(3, Math.min(8, params.trackWidth * 0.08));
+}
+
+function getFittedBendAllowance(params: BowlParams) {
+  if (params.shape !== "round" || !params.partFitLength || params.partFitLength <= 0) return 0;
+
+  const minRadius = Math.max(1, Math.min(getTrackCenterRadius(params, 0), getTrackCenterRadius(params, 1)));
+  return (params.partFitLength * params.partFitLength) / (4 * minRadius);
+}
+
+function isSideTopFace(face: PartTopFace) {
+  return face === "xPositive" || face === "xNegative" || face === "zPositive" || face === "zNegative";
+}
+
+function getTopFaceSideBias(face: PartTopFace) {
+  return face === "xNegative" || face === "zNegative" ? -1 : 1;
+}
+
+function getConstrainedMaxDistance({
+  canEnterTrack,
+  canExit,
+  canPassGuide,
+  entryDistance,
+  guideEntryDistance,
+  minimumSpacing,
+  outletEntryDistance,
+  pathLength,
+}: {
+  canEnterTrack: boolean;
+  canExit: boolean;
+  canPassGuide: boolean;
+  entryDistance: number;
+  guideEntryDistance: number;
+  minimumSpacing: number;
+  outletEntryDistance: number;
+  pathLength: number;
+}) {
+  if (!canEnterTrack) {
+    return Math.max(0, entryDistance * 0.35);
+  }
+
+  if (!canPassGuide) {
+    return Math.max(0, guideEntryDistance - minimumSpacing * 0.25);
+  }
+
+  if (!canExit) {
+    return Math.max(entryDistance, outletEntryDistance - minimumSpacing * 0.35);
+  }
+
+  return pathLength;
+}
+
 function getEffectiveTotalRise(params: BowlParams) {
   return getEffectiveTrackTotalRise(params);
 }
@@ -257,6 +486,11 @@ function getTrackThicknessAt(t: number, thickness: number) {
 
 function smoothstep(t: number) {
   return t * t * (3 - 2 * t);
+}
+
+function smootherstep(t: number) {
+  const clamped = THREE.MathUtils.clamp(t, 0, 1);
+  return clamped * clamped * clamped * (clamped * (clamped * 6 - 15) + 10);
 }
 
 function getProfileHeightRatio(params: BowlParams, localRise: number) {
@@ -271,6 +505,12 @@ function getRoundProfileRadius(params: BowlParams, heightRatio: number) {
 
   const bottomRadius = topRadius * THREE.MathUtils.clamp(params.conicalBottomRatio / 100, 0.35, 1);
   return bottomRadius + (topRadius - bottomRadius) * THREE.MathUtils.clamp(heightRatio, 0, 1);
+}
+
+function getOutletSideAxis(tangent: THREE.Vector3) {
+  return new THREE.Vector3()
+    .crossVectors(tangent.clone().normalize(), new THREE.Vector3(0, 1, 0))
+    .normalize();
 }
 
 function wrapDistance(distanceMm: number, pathLength: number) {
