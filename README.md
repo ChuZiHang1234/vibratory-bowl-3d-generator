@@ -4,6 +4,14 @@
 
 软件按本地离线方向设计：零件模型解析、参数推荐、3D 预览、振动盘模型生成和 STL 导出都在本机完成，运行时不依赖网络服务。
 
+## 预览截图
+
+![振动盘 3D 生成器总览](docs/screenshots/01-overview.png)
+
+![轨道本体导向俯视图](docs/screenshots/02-integrated-track-top.png)
+
+![轨道本体导向透视图](docs/screenshots/03-integrated-track-angled.png)
+
 ## 核心流程
 
 1. 用户导入零件模型。
