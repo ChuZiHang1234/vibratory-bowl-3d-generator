@@ -2,6 +2,12 @@ import * as THREE from "three";
 import { OBJExporter } from "three/examples/jsm/exporters/OBJExporter.js";
 import { STLExporter } from "three/examples/jsm/exporters/STLExporter.js";
 import type { BowlParams, ExportFormat, PartTopFace } from "../types";
+import {
+  getOrientationGuideLayout,
+  getOrientationGuideProgress,
+  getOrientationTrackLaneWidth,
+  needsVerticalOrientationGuide,
+} from "./orientationGuide";
 import { getEffectiveTrackTotalRise } from "./trackClimb";
 
 const TRACK_FLOOR_OVERLAP = 0.8;
@@ -67,7 +73,7 @@ const materials = {
 function createBrushedSteelTexture(min = 92, max = 176) {
   const width = 256;
   const height = 32;
-  const data = new Uint8Array(width * height * 3);
+  const data = new Uint8Array(width * height * 4);
 
   for (let x = 0; x < width; x += 1) {
     const stripe = Math.sin(x * 0.55) * 12 + Math.sin(x * 0.13) * 18;
@@ -75,14 +81,15 @@ function createBrushedSteelTexture(min = 92, max = 176) {
     for (let y = 0; y < height; y += 1) {
       const grain = ((x * 17 + y * 31) % 19) - 9;
       const value = THREE.MathUtils.clamp(Math.round((min + max) / 2 + stripe + grain), min, max);
-      const index = (y * width + x) * 3;
+      const index = (y * width + x) * 4;
       data[index] = value;
       data[index + 1] = value;
       data[index + 2] = value;
+      data[index + 3] = 255;
     }
   }
 
-  const texture = new THREE.DataTexture(data, width, height, THREE.RGBFormat);
+  const texture = new THREE.DataTexture(data, width, height, THREE.RGBAFormat);
   texture.wrapS = THREE.RepeatWrapping;
   texture.wrapT = THREE.RepeatWrapping;
   texture.repeat.set(18, 2);
@@ -98,8 +105,10 @@ export function createVibratoryBowl(params: BowlParams) {
 
   if (params.shape === "round") {
     group.add(createRoundBowlShell(params));
+    group.add(createBottomFeedEntry(params));
     group.add(createSpiralRamp(params));
     group.add(createSpiralGuard(params));
+    group.add(createSpiralOrientationStation(params));
     group.add(createOutlet(params));
   } else {
     group.add(createRectBowlShell(params));
@@ -486,13 +495,37 @@ function createCenterHub(params: BowlParams) {
     ? Math.max(24, params.bowlDiameter * 0.08)
     : Math.max(24, Math.min(params.bowlLength, params.bowlWidth) * 0.08);
   const height = Math.max(18, params.bowlHeight * 0.18);
+  const group = new THREE.Group();
+  group.name = "中心安装台与盘底分料锥";
   const hub = new THREE.Mesh(
     new THREE.CylinderGeometry(radius, radius * 0.82, height, 96),
     materials.base.clone(),
   );
   hub.name = "中心安装台";
   hub.position.y = params.baseHeight + params.bottomThickness + height / 2;
-  return withEdges(hub, 0x26303a);
+  group.add(withEdges(hub, 0x26303a));
+
+  if (params.shape === "round") {
+    const guideLayout = getOrientationGuideLayout(params);
+    const skirtHeight = THREE.MathUtils.clamp(
+      Math.max(guideLayout.entryPartHeight * 2.2, params.bowlHeight * 0.065),
+      10,
+      28,
+    );
+    const skirtRadius = Math.min(
+      params.bowlDiameter * 0.2,
+      Math.max(radius * 1.38, radius + guideLayout.entryPartSpan * 0.3),
+    );
+    const skirt = new THREE.Mesh(
+      new THREE.CylinderGeometry(radius * 0.78, skirtRadius, skirtHeight, 96, 1, false),
+      materials.track.clone(),
+    );
+    skirt.name = "盘底向外分料浅锥";
+    skirt.position.y = params.baseHeight + params.bottomThickness + skirtHeight / 2;
+    group.add(withEdges(skirt, 0x87919c));
+  }
+
+  return group;
 }
 
 function createPolishedRim(radius: number, tubeRadius: number, y: number) {
@@ -504,6 +537,158 @@ function createPolishedRim(radius: number, tubeRadius: number, y: number) {
   mesh.castShadow = true;
   mesh.receiveShadow = true;
   return mesh;
+}
+
+function createBottomFeedEntry(params: BowlParams) {
+  const group = new THREE.Group();
+  group.name = "盘底集料与首圈拾取入口";
+  const layout = getOrientationGuideLayout(params);
+  const wallThickness = Math.max(2.4, params.wallThickness * 0.72);
+  const gateBottom = layout.entryPartHeight
+    + Math.min(layout.clearance * 0.9, layout.entryPartHeight * 0.55);
+
+  const apron = new THREE.Mesh(createBottomEntryApronGeometry(params), materials.outlet.clone());
+  apron.name = "盘底齐平喇叭拾取舌";
+  group.add(withEdges(apron, 0x1f5963));
+
+  const innerGuide = new THREE.Mesh(
+    createBottomEntryInnerGuideWallGeometry(params, wallThickness),
+    materials.guard.clone(),
+  );
+  innerGuide.name = "盘底弧形集料拨入导流板";
+  group.add(withEdges(innerGuide, 0x55616d));
+
+  const gateMaterial = materials.guard.clone();
+  gateMaterial.color.setHex(0x596874);
+  gateMaterial.opacity = 0.68;
+  gateMaterial.transparent = true;
+  gateMaterial.depthWrite = false;
+  const gate = new THREE.Mesh(
+    createBottomEntryGateGeometry(params, gateBottom, Math.max(2.4, wallThickness * 0.75)),
+    gateMaterial,
+  );
+  gate.name = "盘底入口单层限高门";
+  gate.renderOrder = 3;
+  group.add(withEdges(gate, 0x55616d));
+
+  return group;
+}
+
+interface BottomEntrySection {
+  angle: number;
+  innerRadius: number;
+  outerRadius: number;
+  ratio: number;
+}
+
+function getBottomEntrySection(params: BowlParams, ratio: number): BottomEntrySection {
+  const layout = getOrientationGuideLayout(params);
+  const startPose = getSpiralTrackPose(params, 0);
+  const sign = params.feedDirection === "clockwise" ? -1 : 1;
+  const startAngle = Math.PI * 0.2;
+  const entryAngle = layout.entryApproachLength / Math.max(20, startPose.trackCenterRadius);
+  const u = THREE.MathUtils.clamp(ratio, 0, 1);
+  const laneBlend = smootherstep(u);
+  const laneWidth = THREE.MathUtils.lerp(layout.entryCaptureWidth, params.trackWidth, laneBlend);
+  const outerRadius = startPose.trackCenterRadius + params.trackWidth / 2;
+
+  return {
+    angle: startAngle - sign * entryAngle * (1 - u),
+    innerRadius: Math.max(1, outerRadius - laneWidth),
+    outerRadius,
+    ratio: u,
+  };
+}
+
+function createBottomEntryApronGeometry(params: BowlParams) {
+  const steps = 72;
+  const floorY = params.baseHeight + params.bottomThickness;
+  const vertices: number[] = [];
+  const indices: number[] = [];
+
+  for (let index = 0; index <= steps; index += 1) {
+    const section = getBottomEntrySection(params, index / steps);
+    const topY = floorY + 0.025 + Math.sin(section.ratio * Math.PI) * 0.11;
+    const bottomY = floorY + 0.01;
+    const cos = Math.cos(section.angle);
+    const sin = Math.sin(section.angle);
+    vertices.push(section.innerRadius * cos, topY, section.innerRadius * sin);
+    vertices.push(section.outerRadius * cos, topY, section.outerRadius * sin);
+    vertices.push(section.innerRadius * cos, bottomY, section.innerRadius * sin);
+    vertices.push(section.outerRadius * cos, bottomY, section.outerRadius * sin);
+  }
+
+  stitchFeedDirectionStripIndices(indices, steps, params, { capEnd: false, capStart: false });
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(vertices, 3));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+  return geometry;
+}
+
+function createBottomEntryInnerGuideWallGeometry(
+  params: BowlParams,
+  thickness: number,
+) {
+  const steps = 72;
+  const floorY = params.baseHeight + params.bottomThickness + 0.03;
+  const layout = getOrientationGuideLayout(params);
+  const targetHeight = Math.max(4, layout.entryPartHeight + layout.clearance);
+  const vertices: number[] = [];
+  const indices: number[] = [];
+
+  for (let index = 0; index <= steps; index += 1) {
+    const section = getBottomEntrySection(params, index / steps);
+    const height = THREE.MathUtils.lerp(1.2, targetHeight, smootherstep(section.ratio));
+    const boundary = section.innerRadius;
+    const innerRadius = Math.max(1, boundary - thickness);
+    const outerRadius = boundary;
+    const cos = Math.cos(section.angle);
+    const sin = Math.sin(section.angle);
+    vertices.push(innerRadius * cos, floorY, innerRadius * sin);
+    vertices.push(outerRadius * cos, floorY, outerRadius * sin);
+    vertices.push(innerRadius * cos, floorY + height, innerRadius * sin);
+    vertices.push(outerRadius * cos, floorY + height, outerRadius * sin);
+  }
+
+  stitchFeedDirectionStripIndices(indices, steps, params, { capEnd: false, capStart: false });
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(vertices, 3));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+  return geometry;
+}
+
+function createBottomEntryGateGeometry(params: BowlParams, gateBottom: number, thickness: number) {
+  const steps = 30;
+  const startRatio = 0.58;
+  const endRatio = 0.88;
+  const floorY = params.baseHeight + params.bottomThickness;
+  const railRelief = Math.max(1.2, params.wallThickness * 0.45);
+  const vertices: number[] = [];
+  const indices: number[] = [];
+
+  for (let index = 0; index <= steps; index += 1) {
+    const ratio = THREE.MathUtils.lerp(startRatio, endRatio, index / steps);
+    const section = getBottomEntrySection(params, ratio);
+    const innerRadius = section.innerRadius + railRelief;
+    const outerRadius = Math.max(innerRadius + 1, section.outerRadius - railRelief);
+    const yBottom = floorY + gateBottom;
+    const yTop = yBottom + thickness;
+    const cos = Math.cos(section.angle);
+    const sin = Math.sin(section.angle);
+    vertices.push(innerRadius * cos, yBottom, innerRadius * sin);
+    vertices.push(outerRadius * cos, yBottom, outerRadius * sin);
+    vertices.push(innerRadius * cos, yTop, innerRadius * sin);
+    vertices.push(outerRadius * cos, yTop, outerRadius * sin);
+  }
+
+  stitchFeedDirectionStripIndices(indices, steps, params, { capEnd: true, capStart: true });
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(vertices, 3));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+  return geometry;
 }
 
 function createSpiralRamp(params: BowlParams) {
@@ -522,13 +707,23 @@ function createSpiralGuard(params: BowlParams) {
   group.name = "轨道限位挡边";
   const guardThickness = Math.max(2.4, params.wallThickness * 0.72);
   const guardHeight = getTrackEdgeBaffleHeight(params);
+  const layout = getOrientationGuideLayout(params);
 
-  const innerGuard = new THREE.Mesh(
-    createTrackEdgeBaffleGeometry(params, "inner", guardThickness, guardHeight * 0.82),
-    materials.guard.clone(),
-  );
-  innerGuard.name = "轨道内侧限位挡边";
-  group.add(withEdges(innerGuard, 0x55616d));
+  const addInnerGuard = (name: string, tStart: number, tEnd: number) => {
+    const innerGuard = new THREE.Mesh(
+      createTrackEdgeBaffleGeometry(params, "inner", guardThickness, guardHeight * 0.82, tStart, tEnd),
+      materials.guard.clone(),
+    );
+    innerGuard.name = name;
+    group.add(withEdges(innerGuard, 0x55616d));
+  };
+
+  if (layout.guideActive) {
+    addInnerGuard("轨道内侧限位挡边-回料口前", 0, layout.rejectStart);
+    addInnerGuard("轨道内侧限位挡边-回料口后", layout.rejectEnd, 1);
+  } else {
+    addInnerGuard("轨道内侧限位挡边", 0, 1);
+  }
 
   const outerGuard = new THREE.Mesh(
     createTrackEdgeBaffleGeometry(params, "outer", guardThickness, guardHeight),
@@ -542,206 +737,138 @@ function createSpiralGuard(params: BowlParams) {
 
 function createSpiralOrientationStation(params: BowlParams) {
   const group = new THREE.Group();
-  group.name = "全程轨道选面导向";
-  if (params.partTopFace === "auto") return group;
+  group.name = "单层整列与连续翻转定向机构";
+  if (!needsVerticalOrientationGuide(params)) return group;
 
-  const faceName = getTopFaceStructureName(params.partTopFace);
-  const isSideFace = isSideTopFace(params.partTopFace);
+  const layout = getOrientationGuideLayout(params);
+  const faceName = params.partTopFace === "auto"
+    ? "立式出料"
+    : getTopFaceStructureName(params.partTopFace);
   const railThickness = Math.max(4, params.wallThickness);
-  const guideStart = Math.max(TRACK_LEAD_IN_RATIO, 0.06);
-  const holdStart = 0.82;
-  const guideEnd = 1;
-  const laneWidth = getFittedLaneWidth(params) ?? (isSideFace
-    ? THREE.MathUtils.clamp(params.trackWidth * 0.46, railThickness * 3.2, params.trackWidth * 0.62)
-    : THREE.MathUtils.clamp(params.trackWidth * 0.72, railThickness * 4.2, params.trackWidth - railThickness * 1.4));
-  const guideLaneWidth = THREE.MathUtils.clamp(
-    Math.max(laneWidth + railThickness * 4, params.trackWidth * 0.86),
-    laneWidth,
-    Math.max(laneWidth, params.trackWidth - railThickness * 1.2),
+  const entryWallOffset = layout.entryLaneWidth / 2 + railThickness / 2;
+  const gateBottom = layout.entryPartHeight
+    + Math.min(layout.clearance * 0.9, layout.entryPartHeight * 0.55);
+  const gateHeight = Math.max(railThickness * 0.7, 2.4);
+  const guideHeight = Math.max(
+    params.guardHeight,
+    layout.entryPartSpan + layout.clearance * 2,
   );
-  const railHeightFallback = isSideFace
-    ? Math.max(params.guardHeight * 0.92, params.outletHeight * 0.66)
-    : Math.max(8, Math.min(params.guardHeight * 0.48, params.outletHeight * 0.34));
-  const railHeight = getFittedGuideHeight(params, railHeightFallback);
-  const guideLaneOffset = guideLaneWidth / 2 + railThickness / 2;
-  const keepLaneOffset = laneWidth / 2 + railThickness / 2;
-  const guideDeckThickness = Math.max(1.2, params.trackThickness * 0.18);
-  const guideDeckLift = getGuideDeckLift(params);
 
   group.add(createSpiralGuideWall(params, {
     capEnd: false,
     capStart: false,
     edgeColor: 0x1f5963,
-    heightRiseEndRatio: 0.18,
-    height: railHeight,
+    endRadialOffset: entryWallOffset,
+    height: Math.max(railThickness * 1.35, layout.entryPartHeight + layout.clearance),
     material: materials.outlet,
-    name: `${faceName}全程爬升窄槽外挡`,
-    radialOffset: guideLaneOffset,
+    name: `${faceName}平躺单列外基准挡`,
+    radialOffset: params.trackWidth / 2 - railThickness,
     radialThickness: railThickness,
-    startHeight: Math.max(railThickness * 0.7, railHeight * 0.18),
-    tEnd: holdStart,
-    tStart: guideStart,
+    tEnd: layout.flipStart,
+    tStart: layout.singulationStart,
   }));
 
   group.add(createSpiralGuideWall(params, {
     capEnd: false,
     capStart: false,
     edgeColor: 0x55616d,
-    heightRiseEndRatio: 0.18,
-    height: isSideFace ? railHeight * 0.52 : railHeight,
+    endRadialOffset: -entryWallOffset,
+    height: Math.max(railThickness * 1.1, layout.entryPartHeight + layout.clearance * 0.8),
     material: materials.guard,
-    name: `${faceName}全程爬升窄槽内挡`,
-    radialOffset: -guideLaneOffset,
+    name: `${faceName}平躺单列内收口挡`,
+    radialOffset: -params.trackWidth / 2 + railThickness,
     radialThickness: railThickness,
-    startHeight: Math.max(railThickness * 0.7, railHeight * 0.14),
-    tEnd: holdStart,
-    tStart: guideStart,
+    tEnd: layout.rejectStart,
+    tStart: layout.singulationStart,
   }));
 
   group.add(createSpiralGuideWall(params, {
     capEnd: false,
     capStart: false,
     edgeColor: 0x1f5963,
-    endRadialOffset: keepLaneOffset,
-    height: railHeight,
+    bottomYOffset: gateBottom,
+    endRadialOffset: -entryWallOffset - railThickness * 1.2,
+    height: gateHeight,
     material: materials.outlet,
-    name: `${faceName}末端渐缩保持外挡`,
-    radialOffset: guideLaneOffset,
-    radialThickness: railThickness,
-    tEnd: guideEnd,
-    tStart: holdStart,
+    name: `${faceName}单层限高斜刮条`,
+    radialOffset: entryWallOffset + railThickness,
+    radialThickness: Math.max(2.4, railThickness * 0.62),
+    tEnd: layout.rejectEnd,
+    tStart: layout.rejectStart,
+  }));
+
+  group.add(createBottomReturnChute(
+    params,
+    `${faceName}叠料与错姿态盘面回料坡`,
+    0x1f5963,
+  ));
+
+  group.add(createSpiralTwistGuideSurface(params, {
+    edgeColor: 0x1f5963,
+    material: materials.outlet,
+    name: `${faceName}零到九十度连续承托扭转面`,
+    normalOffset: 0,
+    plateDirection: -1,
+    thickness: Math.max(2.4, railThickness * 0.48),
+    tEnd: layout.proofEnd,
+    tStart: layout.flipStart,
+    uEnd: 0.5,
+    uStart: -0.5,
+  }));
+
+  group.add(createSpiralTwistGuideSurface(params, {
+    edgeColor: 0x55616d,
+    material: materials.guard,
+    name: `${faceName}随动上压防跳轨一`,
+    normalOffset: layout.targetLaneWidth,
+    plateDirection: 1,
+    thickness: railThickness,
+    tEnd: layout.proofEnd,
+    tStart: layout.flipStart,
+    uEnd: -0.29,
+    uStart: -0.5,
+  }));
+
+  group.add(createSpiralTwistGuideSurface(params, {
+    edgeColor: 0x55616d,
+    material: materials.guard,
+    name: `${faceName}随动上压防跳轨二`,
+    normalOffset: layout.targetLaneWidth,
+    plateDirection: 1,
+    thickness: railThickness,
+    tEnd: layout.proofEnd,
+    tStart: layout.flipStart,
+    uEnd: 0.5,
+    uStart: 0.29,
   }));
 
   group.add(createSpiralGuideWall(params, {
+    bottomYOffset: 0,
+    capEnd: false,
+    capStart: false,
+    edgeColor: 0x1f5963,
+    height: guideHeight,
+    material: materials.outlet,
+    name: `${faceName}九十度姿态证明槽外挡`,
+    radialOffset: layout.targetLaneWidth / 2 + railThickness / 2,
+    radialThickness: railThickness,
+    tEnd: layout.proofEnd,
+    tStart: layout.flipEnd,
+  }));
+
+  group.add(createSpiralGuideWall(params, {
+    bottomYOffset: 0,
     capEnd: false,
     capStart: false,
     edgeColor: 0x55616d,
-    endRadialOffset: -keepLaneOffset,
-    height: isSideFace ? railHeight * 0.52 : railHeight,
+    height: guideHeight,
     material: materials.guard,
-    name: `${faceName}末端渐缩保持内挡`,
-    radialOffset: -guideLaneOffset,
+    name: `${faceName}九十度姿态证明槽内挡`,
+    radialOffset: -layout.targetLaneWidth / 2 - railThickness / 2,
     radialThickness: railThickness,
-    tEnd: guideEnd,
-    tStart: holdStart,
+    tEnd: layout.proofEnd,
+    tStart: layout.flipEnd,
   }));
-
-  group.add(createSpiralTaperedLaneSurface(params, {
-    capEnd: false,
-    capStart: false,
-    edgeColor: 0x1f5963,
-    endLaneWidth: guideLaneWidth,
-    endYOffset: guideDeckLift,
-    material: materials.outlet,
-    name: `${faceName}导向入口连续上坡轨面`,
-    riseEndRatio: 0.72,
-    riseStartRatio: 0.14,
-    startLaneWidth: guideLaneWidth,
-    startYOffset: 0,
-    thickness: guideDeckThickness,
-    tEnd: holdStart,
-    tStart: guideStart,
-  }));
-
-  group.add(createSpiralTaperedLaneSurface(params, {
-    capEnd: false,
-    capStart: false,
-    edgeColor: 0x1f5963,
-    endLaneWidth: laneWidth,
-    endYOffset: guideDeckLift,
-    material: materials.outlet,
-    name: `${faceName}末端渐缩保持轨面`,
-    startLaneWidth: guideLaneWidth,
-    startYOffset: guideDeckLift,
-    thickness: guideDeckThickness,
-    tEnd: guideEnd,
-    tStart: holdStart,
-  }));
-
-  if (isSideFace) {
-    const sideBias = getTopFaceSideBias(params.partTopFace);
-    const rampWidth = Math.max(params.trackWidth * 0.68, laneWidth + railThickness * 2);
-    const rampThickness = Math.max(2.4, railThickness * 0.48);
-    const rampLow = rampThickness + 0.8;
-    const rampLift = Math.max(railThickness * 2.1, params.trackThickness * 1.35);
-    const topRailOffset = getTopGuideSurfaceYOffset(
-      params,
-      Math.max(railHeight * 0.82, rampLift + railThickness * 1.2),
-      railThickness,
-    );
-
-    group.add(createSpiralSlopedGuideSurface(params, {
-      capEnd: false,
-      capStart: false,
-      aRadialOffset: -sideBias * rampWidth / 2,
-      aYOffset: rampLow,
-      aEndYOffset: rampLow,
-      bRadialOffset: sideBias * rampWidth / 2,
-      bYOffset: rampLow,
-      bEndYOffset: rampLift,
-      edgeColor: 0x1f5963,
-      material: materials.outlet,
-      name: `${faceName}全程连续翻面导向斜面`,
-      riseEndRatio: 0.92,
-      riseStartRatio: 0.12,
-      thickness: rampThickness,
-      tEnd: guideEnd,
-      tStart: guideStart,
-    }));
-
-    group.add(createSpiralSlopedGuideSurface(params, {
-      capEnd: false,
-      capStart: false,
-      aRadialOffset: -laneWidth * 0.32,
-      aYOffset: topRailOffset,
-      bRadialOffset: laneWidth * 0.32,
-      bYOffset: topRailOffset,
-      edgeColor: 0x55616d,
-      material: materials.guard,
-      name: `${faceName}全程立槽上限轨`,
-      thickness: railThickness,
-      tEnd: guideEnd,
-      tStart: guideStart,
-    }));
-  } else {
-    const clearance = getTopGuideSurfaceYOffset(
-      params,
-      Math.max(params.trackThickness + railThickness * 2.4, railHeight + railThickness * 1.8),
-      railThickness,
-    );
-    const returnThickness = Math.max(2.4, railThickness * 0.45);
-    const returnLow = returnThickness + 0.8;
-
-    group.add(createSpiralSlopedGuideSurface(params, {
-      capEnd: false,
-      capStart: false,
-      aRadialOffset: -laneWidth * 0.24,
-      aYOffset: clearance,
-      bRadialOffset: laneWidth * 0.24,
-      bYOffset: clearance,
-      edgeColor: 0x55616d,
-      material: materials.guard,
-      name: `${faceName}全程上压保持窄条`,
-      thickness: railThickness,
-      tEnd: guideEnd,
-      tStart: guideStart,
-    }));
-
-    group.add(createSpiralSlopedGuideSurface(params, {
-      capEnd: false,
-      capStart: false,
-      aRadialOffset: -params.trackWidth / 2 + railThickness * 0.8,
-      aYOffset: railHeight + railThickness * 0.8,
-      bRadialOffset: -laneWidth / 2 - railThickness * 0.5,
-      bYOffset: returnLow,
-      edgeColor: 0x1f5963,
-      material: materials.outlet,
-      name: `${faceName}全程错姿态回料斜面`,
-      thickness: returnThickness,
-      tEnd: guideEnd,
-      tStart: guideStart,
-    }));
-  }
 
   return group;
 }
@@ -760,6 +887,7 @@ interface OutletGuideSurfaceOptions extends SpiralStripCapOptions {
 }
 
 interface SpiralGuideWallSpec extends SpiralStripCapOptions {
+  bottomYOffset?: number;
   edgeColor: number;
   endRadialOffset?: number;
   endHeight?: number;
@@ -771,23 +899,6 @@ interface SpiralGuideWallSpec extends SpiralStripCapOptions {
   radialOffset: number;
   radialThickness: number;
   startHeight?: number;
-  tEnd: number;
-  tStart: number;
-}
-
-interface SpiralSlopedSurfaceSpec extends SpiralStripCapOptions {
-  aEndYOffset?: number;
-  aRadialOffset: number;
-  aYOffset: number;
-  bEndYOffset?: number;
-  bRadialOffset: number;
-  bYOffset: number;
-  edgeColor: number;
-  material: THREE.Material;
-  name: string;
-  riseEndRatio?: number;
-  riseStartRatio?: number;
-  thickness: number;
   tEnd: number;
   tStart: number;
 }
@@ -817,7 +928,7 @@ function createSpiralGuideWall(
     const centerRadius = pose.trackCenterRadius + radialOffset;
     const innerRadius = Math.max(1, centerRadius - spec.radialThickness / 2);
     const outerRadius = Math.max(innerRadius + 0.1, centerRadius + spec.radialThickness / 2);
-    const yBottom = pose.position.y;
+    const yBottom = pose.position.y + (spec.bottomYOffset ?? 0);
     const yTop = yBottom + height;
 
     pushRadialVertex(vertices, pose.radial, innerRadius, yBottom);
@@ -826,7 +937,7 @@ function createSpiralGuideWall(
     pushRadialVertex(vertices, pose.radial, outerRadius, yTop);
   }
 
-  stitchSpiralStripIndices(indices, steps, spec);
+  stitchFeedDirectionStripIndices(indices, steps, params, spec);
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute("position", new THREE.Float32BufferAttribute(vertices, 3));
   geometry.setIndex(indices);
@@ -883,7 +994,7 @@ function createSpiralTaperedLaneSurface(
     pushRadialVertex(vertices, pose.radial, outerRadius, yBottom);
   }
 
-  stitchSpiralStripIndices(indices, steps, spec);
+  stitchFeedDirectionStripIndices(indices, steps, params, spec);
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute("position", new THREE.Float32BufferAttribute(vertices, 3));
   geometry.setIndex(indices);
@@ -894,39 +1005,120 @@ function createSpiralTaperedLaneSurface(
   return withEdges(mesh, spec.edgeColor);
 }
 
-function createSpiralSlopedGuideSurface(
-  params: BowlParams,
-  spec: SpiralSlopedSurfaceSpec,
-) {
-  const steps = getOrientationGuideSteps(params, spec.tStart, spec.tEnd);
+function createBottomReturnChute(params: BowlParams, name: string, edgeColor: number) {
+  const layout = getOrientationGuideLayout(params);
+  const steps = getOrientationGuideSteps(params, layout.rejectStart, layout.rejectEnd);
+  const floorY = params.baseHeight + params.bottomThickness;
+  const thickness = 0.8;
   const vertices: number[] = [];
   const indices: number[] = [];
 
   for (let index = 0; index <= steps; index += 1) {
     const ratio = index / steps;
-    const liftBlend = getGuideRiseBlend(ratio, spec.riseStartRatio, spec.riseEndRatio);
-    const t = THREE.MathUtils.lerp(spec.tStart, spec.tEnd, ratio);
+    const t = THREE.MathUtils.lerp(layout.rejectStart, layout.rejectEnd, ratio);
     const pose = getSpiralTrackPose(params, t);
-    const aRadius = Math.max(1, pose.trackCenterRadius + spec.aRadialOffset);
-    const bRadius = Math.max(1, pose.trackCenterRadius + spec.bRadialOffset);
-    const aTopY = pose.position.y + THREE.MathUtils.lerp(
-      spec.aYOffset,
-      spec.aEndYOffset ?? spec.aYOffset,
-      liftBlend,
+    const aRadius = Math.max(1, pose.trackCenterRadius - layout.entryLaneWidth / 2);
+    const bRadius = Math.max(
+      1,
+      pose.trackCenterRadius - params.trackWidth / 2 - layout.entryPartSpan * 0.72,
     );
-    const bTopY = pose.position.y + THREE.MathUtils.lerp(
-      spec.bYOffset,
-      spec.bEndYOffset ?? spec.bYOffset,
-      liftBlend,
-    );
+    const aTopY = pose.position.y + 0.3;
+    const bTopY = floorY + 1.15;
 
     pushRadialVertex(vertices, pose.radial, aRadius, aTopY);
     pushRadialVertex(vertices, pose.radial, bRadius, bTopY);
-    pushRadialVertex(vertices, pose.radial, aRadius, aTopY - spec.thickness);
-    pushRadialVertex(vertices, pose.radial, bRadius, bTopY - spec.thickness);
+    pushRadialVertex(vertices, pose.radial, aRadius, Math.max(floorY + 0.12, aTopY - thickness));
+    pushRadialVertex(vertices, pose.radial, bRadius, floorY + 0.35);
   }
 
-  stitchSpiralStripIndices(indices, steps, spec);
+  stitchFeedDirectionStripIndices(indices, steps, params, { capEnd: false, capStart: false });
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(vertices, 3));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+
+  const mesh = new THREE.Mesh(geometry, materials.outlet.clone());
+  mesh.name = name;
+  return withEdges(mesh, edgeColor);
+}
+
+interface SpiralTwistGuideSurfaceSpec {
+  edgeColor: number;
+  material: THREE.Material;
+  name: string;
+  normalOffset: number;
+  plateDirection: -1 | 1;
+  thickness: number;
+  tEnd: number;
+  tStart: number;
+  uEnd: number;
+  uStart: number;
+}
+
+function createSpiralTwistGuideSurface(
+  params: BowlParams,
+  spec: SpiralTwistGuideSurfaceSpec,
+) {
+  const layout = getOrientationGuideLayout(params);
+  const steps = getOrientationGuideSteps(params, spec.tStart, spec.tEnd);
+  const span = layout.entryPartSpan + layout.clearance * 2;
+  const gap = layout.targetLaneWidth;
+  const direction = layout.highSideDirection;
+  const vertices: number[] = [];
+  const indices: number[] = [];
+
+  for (let index = 0; index <= steps; index += 1) {
+    const ratio = index / steps;
+    const t = THREE.MathUtils.lerp(spec.tStart, spec.tEnd, ratio);
+    const pose = getSpiralTrackPose(params, t);
+    const progress = getOrientationGuideProgress(params, t);
+    const angle = progress * Math.PI * 0.5;
+    const sin = Math.sin(angle);
+    const cos = Math.cos(angle);
+    const qSide = direction * cos;
+    const qY = sin;
+    const rSide = -direction * sin;
+    const rY = cos;
+    const centerSide = direction * gap * 0.5 * progress;
+    const centerY = span * 0.5 * Math.abs(sin);
+
+    const getPoint = (u: number, normalOffset: number) => ({
+      side: centerSide + qSide * span * u + rSide * normalOffset,
+      y: centerY + qY * span * u + rY * normalOffset,
+    });
+    const a = getPoint(spec.uStart, spec.normalOffset);
+    const b = getPoint(spec.uEnd, spec.normalOffset);
+    const plateOffset = spec.plateDirection * spec.thickness;
+    const aBack = getPoint(spec.uStart, spec.normalOffset + plateOffset);
+    const bBack = getPoint(spec.uEnd, spec.normalOffset + plateOffset);
+
+    pushRadialVertex(
+      vertices,
+      pose.radial,
+      Math.max(1, pose.trackCenterRadius + a.side),
+      pose.position.y + a.y,
+    );
+    pushRadialVertex(
+      vertices,
+      pose.radial,
+      Math.max(1, pose.trackCenterRadius + b.side),
+      pose.position.y + b.y,
+    );
+    pushRadialVertex(
+      vertices,
+      pose.radial,
+      Math.max(1, pose.trackCenterRadius + aBack.side),
+      pose.position.y + aBack.y,
+    );
+    pushRadialVertex(
+      vertices,
+      pose.radial,
+      Math.max(1, pose.trackCenterRadius + bBack.side),
+      pose.position.y + bBack.y,
+    );
+  }
+
+  stitchFeedDirectionStripIndices(indices, steps, params, { capEnd: false, capStart: false });
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute("position", new THREE.Float32BufferAttribute(vertices, 3));
   geometry.setIndex(indices);
@@ -963,6 +1155,21 @@ function stitchSpiralStripIndices(
   if (options.capEnd ?? true) {
     const end = steps * 4;
     indices.push(end, end + 2, end + 1, end + 1, end + 2, end + 3);
+  }
+}
+
+function stitchFeedDirectionStripIndices(
+  indices: number[],
+  steps: number,
+  params: BowlParams,
+  options: SpiralStripCapOptions = {},
+) {
+  const startIndex = indices.length;
+  stitchSpiralStripIndices(indices, steps, options);
+  if (params.feedDirection !== "clockwise") return;
+
+  for (let index = startIndex; index < indices.length; index += 3) {
+    [indices[index + 1], indices[index + 2]] = [indices[index + 2], indices[index + 1]];
   }
 }
 
@@ -1093,6 +1300,7 @@ function createOutlet(params: BowlParams) {
   group.name = "出料口";
   group.add(createOutletPlatform(params, layout, y, totalOutletLength));
   group.add(withEdges(outlet, 0x1f5963));
+  group.add(createOrientationSelector(params, layout, y, totalOutletLength));
   group.add(createOutletOrientationGuides(params, layout, y, totalOutletLength));
   return group;
 }
@@ -1171,6 +1379,53 @@ function createOrientationSelector(
 ) {
   const group = new THREE.Group();
   group.name = "出料过渡选面接续导向";
+  if (needsVerticalOrientationGuide(params)) {
+    const orientationLayout = getOrientationGuideLayout(params);
+    const railThickness = Math.max(4, params.wallThickness);
+    const selectorStart = -getOutletTransitionOverlap(params);
+    const selectorEnd = Math.max(selectorStart + 24, totalOutletLength - railThickness * 0.6);
+    const guideHeight = Math.max(
+      params.guardHeight,
+      orientationLayout.entryPartSpan + orientationLayout.clearance * 2,
+    );
+
+    addOutletTaperedGuideWall(
+      group,
+      "连续翻转后竖槽外保持挡",
+      selectorStart,
+      selectorEnd,
+      orientationLayout.targetLaneWidth,
+      orientationLayout.targetLaneWidth,
+      1,
+      guideHeight,
+      railThickness,
+      params.trackThickness / 2,
+      trackCenterY,
+      layout,
+      materials.outlet.clone(),
+      0x1f5963,
+      { capStart: false },
+    );
+    addOutletTaperedGuideWall(
+      group,
+      "连续翻转后竖槽内保持挡",
+      selectorStart,
+      selectorEnd,
+      orientationLayout.targetLaneWidth,
+      orientationLayout.targetLaneWidth,
+      -1,
+      guideHeight,
+      railThickness,
+      params.trackThickness / 2,
+      trackCenterY,
+      layout,
+      materials.guard.clone(),
+      0x55616d,
+      { capStart: false },
+    );
+    return group;
+  }
+
   if (params.partTopFace === "auto") return group;
 
   const faceName = getTopFaceStructureName(params.partTopFace);
@@ -1490,6 +1745,7 @@ function createOutletOrientationGuides(
   const group = new THREE.Group();
   group.name = "出口末端姿态处理机构";
   if (params.outletOrientation === "free") return group;
+  if (needsVerticalOrientationGuide(params)) return group;
 
   const railThickness = Math.max(4, params.wallThickness);
   const startPoint = layout.radial.clone().multiplyScalar(layout.trackCenterRadius);
@@ -1617,19 +1873,7 @@ function createSpiralStripGeometry(
     vertices.push(trackShape.outerRadius * cos, yBottom, trackShape.outerRadius * sin);
   }
 
-  for (let i = 0; i < steps; i += 1) {
-    const a = i * 4;
-    const b = (i + 1) * 4;
-
-    indices.push(a, b, a + 1, a + 1, b, b + 1);
-    indices.push(a + 2, a + 3, b + 2, a + 3, b + 3, b + 2);
-    indices.push(a, a + 2, b, a + 2, b + 2, b);
-    indices.push(a + 1, b + 1, a + 3, a + 3, b + 1, b + 3);
-  }
-
-  indices.push(0, 1, 2, 1, 3, 2);
-  const end = steps * 4;
-  indices.push(end, end + 2, end + 1, end + 1, end + 2, end + 3);
+  stitchFeedDirectionStripIndices(indices, steps, params);
 
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute("position", new THREE.Float32BufferAttribute(vertices, 3));
@@ -1645,6 +1889,19 @@ function getIntegratedTrackShape(
   baseOuterRadius: number,
 ) {
   const baseWidth = Math.max(1, baseOuterRadius - baseInnerRadius);
+  if (needsVerticalOrientationGuide(params)) {
+    const laneWidth = getOrientationTrackLaneWidth(params, t, baseWidth);
+    const centerRadius = (baseInnerRadius + baseOuterRadius) / 2;
+    const innerRadius = Math.max(1, centerRadius - laneWidth / 2);
+    const outerRadius = Math.max(innerRadius + 0.1, centerRadius + laneWidth / 2);
+    return {
+      innerRadius,
+      innerYOffset: 0,
+      outerRadius,
+      outerYOffset: 0,
+    };
+  }
+
   if (params.partTopFace === "auto") {
     return {
       innerRadius: baseInnerRadius,
@@ -1725,8 +1982,10 @@ function createTrackEdgeBaffleGeometry(
   side: "inner" | "outer",
   baffleThickness: number,
   baffleHeight: number,
+  tStart = 0,
+  tEnd = 1,
 ) {
-  const steps = Math.max(96, Math.round(params.trackTurns * 96));
+  const steps = Math.max(12, Math.round(params.trackTurns * 96 * Math.max(0.08, tEnd - tStart)));
   const sign = params.feedDirection === "clockwise" ? -1 : 1;
   const totalAngle = params.trackTurns * Math.PI * 2;
   const startAngle = Math.PI * 0.2;
@@ -1737,7 +1996,7 @@ function createTrackEdgeBaffleGeometry(
   const indices: number[] = [];
 
   for (let i = 0; i <= steps; i += 1) {
-    const t = i / steps;
+    const t = THREE.MathUtils.lerp(tStart, tEnd, i / steps);
     const angle = startAngle + sign * totalAngle * t;
     const profileRatio = getProfileHeightRatio(params, totalRise * t);
     const localRadius = getRoundProfileRadius(params, profileRatio);
@@ -1749,7 +2008,10 @@ function createTrackEdgeBaffleGeometry(
     const innerRadius = side === "inner" ? Math.max(1, edgeRadius - baffleThickness) : edgeRadius;
     const outerRadius = side === "inner" ? edgeRadius : edgeRadius + baffleThickness;
     const yBottom = baseY + totalRise * t + getTrackThicknessAt(t, trackThickness) + edgeYOffset - 0.18;
-    const yTop = yBottom + baffleHeight;
+    const entryRise = tStart <= 0.0001
+      ? THREE.MathUtils.lerp(0.16, 1, smootherstep(THREE.MathUtils.clamp(t / 0.045, 0, 1)))
+      : 1;
+    const yTop = yBottom + baffleHeight * entryRise;
     const cos = Math.cos(angle);
     const sin = Math.sin(angle);
 
@@ -1766,6 +2028,12 @@ function createTrackEdgeBaffleGeometry(
     indices.push(a, b, a + 2, a + 2, b, b + 2);
     indices.push(a + 1, a + 3, b + 1, a + 3, b + 3, b + 1);
     indices.push(a + 2, b + 2, a + 3, a + 3, b + 2, b + 3);
+  }
+
+  if (params.feedDirection === "clockwise") {
+    for (let index = 0; index < indices.length; index += 3) {
+      [indices[index + 1], indices[index + 2]] = [indices[index + 2], indices[index + 1]];
+    }
   }
 
   const geometry = new THREE.BufferGeometry();

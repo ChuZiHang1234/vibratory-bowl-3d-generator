@@ -19,6 +19,7 @@ import { PartAnalysisPreview } from "./components/PartAnalysisPreview";
 import { SceneViewport } from "./components/SceneViewport";
 import { createFaceSelectionFromAxis, getPartTopFaceLabel } from "./components/PartFacePreview";
 import { getMotionConstraints, getVibrationFeedRate } from "./geometry/bowlMotion";
+import { isSideTopFace } from "./geometry/orientationGuide";
 import { buildRecommendedParams, getAnalysisEnvelope, parsePartFile, validateParams } from "./geometry/partAnalysis";
 import { getTrackRisePerTurn } from "./geometry/trackClimb";
 import { exportBowl } from "./geometry/vibratoryBowl";
@@ -62,9 +63,9 @@ function App() {
     if (!constraints.canEnterTrack) return "轨道卡料";
     if (!constraints.canPassGuide) return "导向卡料";
     if (!constraints.canExit) return "出口卡料";
-    return params.partTopFace === "auto" ? "可送料" : "导向送料";
+    return params.partTopFace === "auto" ? "可送料" : "定向送料";
   }, [analysis, params]);
-  const physicsPassed = physicsState === "可送料" || physicsState === "导向送料";
+  const physicsPassed = physicsState === "可送料" || physicsState === "定向送料";
 
   const updateNumber = (key: NumericParamKey, value: number) => {
     setParams((current) => ({
@@ -85,40 +86,73 @@ function App() {
   const setTrackTopFace = (axis: PartTopFace, selection = createFaceSelectionFromAxis(axis)) => {
     setSelectedFace(selection);
     setParams((current) => {
+      const outletOrientation = isSideTopFace(axis)
+        ? (current.outletOrientation === "frontUp" || current.outletOrientation === "backUp"
+          ? "free"
+          : current.outletOrientation)
+        : (axis === "auto"
+          && (current.outletOrientation === "sideUp" || current.outletOrientation === "standing")
+          ? current.outletOrientation
+          : "free");
       const next = {
         ...current,
+        outletOrientation,
         partTopFace: axis,
       };
 
-      if (!analysis || axis === "auto") {
-        return next;
-      }
+      if (!analysis) return next;
 
       const recommended = buildRecommendedParams(analysis, next);
-      return {
-        ...next,
-        guardHeight: recommended.guardHeight,
-        outletHeight: recommended.outletHeight,
-        outletLength: recommended.outletLength,
-        outletWidth: recommended.outletWidth,
-        partFitClearance: recommended.partFitClearance,
-        partFitHeight: recommended.partFitHeight,
-        partFitLength: recommended.partFitLength,
-        partFitWidth: recommended.partFitWidth,
-        trackWidth: recommended.trackWidth,
-      };
+      return mergeOrientationRecommendation(next, recommended);
     });
     return selection;
   };
 
   const handleFaceSelected = (selection: PartFaceSelection) => {
+    if (selection.axis === "yNegative") {
+      setStatus("下表面朝上需要真实的 180° 翻面机构；当前模型不会用动画假装完成，请改选侧面立姿或增加可识别特征。");
+      return;
+    }
     setTrackTopFace(selection.axis, selection);
-    setStatus(`${selection.label} 已设为轨道爬升面，轨道导向间隙已按该面更新。`);
+    setStatus(isSideTopFace(selection.axis)
+      ? `${selection.label} 已设为立姿目标面，已从盘底生成集料舌、单层门、回料口和连续扭转锁姿轨。`
+      : `${selection.label} 已设为平躺基准面，已生成单层限高与保持导向。`);
   };
 
   const handleTopFaceChange = (axis: PartTopFace) => {
+    if (axis === "yNegative") {
+      setStatus("下表面朝上需要真实的 180° 翻面机构；当前版本暂不生成不可信的自动翻面。");
+      return;
+    }
     const selection = setTrackTopFace(axis);
-    setStatus(selection ? `${selection.label} 已设为轨道爬升面，轨道导向间隙已按该面更新。` : "已取消指定轨道爬升面。");
+    setStatus(selection
+      ? (isSideTopFace(axis)
+        ? `${selection.label} 已设为立姿目标面，已从盘底生成集料舌、单层门、回料口和连续扭转锁姿轨。`
+        : `${selection.label} 已设为平躺基准面，已生成单层限高与保持导向。`)
+      : "已取消指定定向目标面。");
+  };
+
+  const handleOutletOrientationChange = (outletOrientation: BowlParams["outletOrientation"]) => {
+    if (outletOrientation === "frontUp" || outletOrientation === "backUp") return;
+    if (outletOrientation === "sideUp" || outletOrientation === "standing") {
+      const resetFlatTarget = params.partTopFace === "yPositive";
+      if (resetFlatTarget) setSelectedFace(null);
+      setParams((current) => {
+        const next = {
+          ...current,
+          outletOrientation,
+          partTopFace: resetFlatTarget ? "auto" as const : current.partTopFace,
+        };
+        return analysis
+          ? mergeOrientationRecommendation(next, buildRecommendedParams(analysis, next))
+          : next;
+      });
+      setStatus(resetFlatTarget
+        ? "已改为立式出料：目标面重置为自动，并从盘底入口启用连续扭转与全程锁姿。"
+        : "已从盘底入口启用集料、单层回料、0–90° 连续扭转和全程锁姿。");
+      return;
+    }
+    setParams((current) => ({ ...current, outletOrientation }));
   };
 
   const handleFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -138,7 +172,7 @@ function App() {
       setAnalysis(parsed.analysis);
       setSelectedFace(null);
       setParams(recommended);
-      setStatus("已完成零件几何分析，并生成推荐振动盘参数，可在左上角预览中点击零件面设为轨道爬升面。");
+      setStatus("已完成零件几何分析。请在左上角点击目标面，软件将按平躺入口与目标姿态分别计算导向间隙。");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "模型解析失败，请检查文件格式。");
     } finally {
@@ -154,7 +188,7 @@ function App() {
     }
 
     setParams((current) => buildRecommendedParams(analysis, current));
-    setStatus("已按当前爬升面重新应用推荐参数。");
+    setStatus("已按当前定向目标面重新计算平躺入口、翻转段和锁姿槽参数。");
   };
 
   const resetParams = () => {
@@ -281,7 +315,7 @@ function App() {
                     <dd>{analysis.recommendedFeedDirection}</dd>
                   </div>
                   <div>
-                    <dt>轨道爬升面</dt>
+                    <dt>定向目标面</dt>
                     <dd>{selectedFace?.label ?? "未选定"}</dd>
                   </div>
                 </dl>
@@ -561,37 +595,40 @@ function App() {
             </div>
 
             <div className="field-group">
-              <label className="field-label">轨道爬升面</label>
+              <label className="field-label">定向目标面</label>
               <select
                 className="field-select"
-                title="决定零件沿螺旋轨道爬升时哪个面朝上"
+                title="决定零件经过单层、翻转和锁姿机构后哪个面朝上"
                 value={params.partTopFace}
                 onChange={(event) => handleTopFaceChange(event.target.value as PartTopFace)}
               >
-                <option value="auto">未选定（按稳定姿态）</option>
+                <option value="auto">未选定（保持平躺稳定姿态）</option>
                 <option value="yPositive">{getPartTopFaceLabel("yPositive")}</option>
-                <option value="yNegative">{getPartTopFaceLabel("yNegative")}</option>
+                <option value="yNegative" disabled>{getPartTopFaceLabel("yNegative")}（需 180° 翻面机构）</option>
                 <option value="xPositive">{getPartTopFaceLabel("xPositive")}</option>
                 <option value="xNegative">{getPartTopFaceLabel("xNegative")}</option>
                 <option value="zPositive">{getPartTopFaceLabel("zPositive")}</option>
                 <option value="zNegative">{getPartTopFaceLabel("zNegative")}</option>
               </select>
+              <small className="field-help">
+                {isSideTopFace(params.partTopFace)
+                  ? "盘底散料 → 振动铺开 → 入口捕获 → 首圈 0–90° 翻转 → 全程锁姿"
+                  : "平躺目标只做单层限高与保持；选择侧面才会生成 90° 翻转机构"}
+              </small>
+              <small className="field-help field-help-warning">正反面对称零件无法靠被动轨道辨面，必须增加特征量规或视觉检测。</small>
             </div>
 
             <div className="field-group">
               <label className="field-label">出口末端处理</label>
               <select
                 className="field-select"
-                title="只控制出料直段末端，不改变轨道上的爬升面"
+                title="控制出料要求；立式要求会在盘底入口后的首圈完成翻转并持续锁姿"
                 value={params.outletOrientation}
-                onChange={(event) => setParams((current) => ({
-                  ...current,
-                  outletOrientation: event.target.value as BowlParams["outletOrientation"],
-                }))}
+                onChange={(event) => handleOutletOrientationChange(event.target.value as BowlParams["outletOrientation"])}
               >
-                <option value="free">保持轨道爬升面</option>
-                <option value="frontUp">末端正面朝上</option>
-                <option value="backUp">末端背面朝上</option>
+                <option value="free">保持定向后的姿态</option>
+                <option value="frontUp" disabled>末端正面朝上（需特征量规）</option>
+                <option value="backUp" disabled>末端背面朝上（需 180° 翻面机构）</option>
                 <option value="sideUp">末端侧面朝上</option>
                 <option value="standing">末端立式出料</option>
               </select>
@@ -657,11 +694,11 @@ function App() {
                 onChange={(value) => updateAnimationNumber("speed", value)}
               />
               <NumberField
-                label="零件数量"
+                label="盘底零件数量"
                 unit="个"
                 value={animationParams.partCount}
                 min={1}
-                max={12}
+                max={32}
                 step={1}
                 onChange={(value) => updateAnimationNumber("partCount", Math.round(value))}
               />
@@ -726,6 +763,25 @@ function App() {
       </main>
     </div>
   );
+}
+
+function mergeOrientationRecommendation(base: BowlParams, recommended: BowlParams): BowlParams {
+  return {
+    ...base,
+    guardHeight: recommended.guardHeight,
+    outletHeight: recommended.outletHeight,
+    outletLength: recommended.outletLength,
+    outletWidth: recommended.outletWidth,
+    partFitClearance: recommended.partFitClearance,
+    partFitHeight: recommended.partFitHeight,
+    partFitLength: recommended.partFitLength,
+    partFitWidth: recommended.partFitWidth,
+    partEntryHeight: recommended.partEntryHeight,
+    partEntryLength: recommended.partEntryLength,
+    partEntryWidth: recommended.partEntryWidth,
+    partForwardAxis: recommended.partForwardAxis,
+    trackWidth: recommended.trackWidth,
+  };
 }
 
 interface MetricProps {

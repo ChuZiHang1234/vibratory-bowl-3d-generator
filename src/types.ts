@@ -37,6 +37,10 @@ export interface BowlParams {
   partFitHeight?: number;
   partFitLength?: number;
   partFitWidth?: number;
+  partEntryHeight?: number;
+  partEntryLength?: number;
+  partEntryWidth?: number;
+  partForwardAxis?: "x" | "z";
   feedDirection: FeedDirection;
   baseLength: number;
   baseWidth: number;
@@ -103,5 +107,5 @@ export const defaultAnimationParams: AnimationParams = {
   frequency: 50,
   amplitude: 3,
   speed: 1,
-  partCount: 6,
+  partCount: 24,
 };

@@ -7,6 +7,7 @@ import { defaultParams } from "../types";
 import type { BowlParams, PartAnalysis, PartTopFace } from "../types";
 import { getMotionConstraints } from "./bowlMotion";
 import type { PhysicalEnvelope } from "./bowlMotion";
+import { getOrientationForwardAxis } from "./orientationGuide";
 import {
   getEffectiveTrackClimbAngleDeg,
   getEffectiveTrackTotalRise,
@@ -171,15 +172,25 @@ export function buildRecommendedParams(
   current: BowlParams = defaultParams,
 ): BowlParams {
   const envelope = getAnalysisEnvelope(analysis, current.partTopFace);
+  const entryEnvelope = getEntryAnalysisEnvelope(analysis, current.partTopFace);
+  const partForwardAxis = getOrientationForwardAxis(
+    current.partTopFace,
+    analysis.length,
+    analysis.width,
+  );
   const wallThickness = current.wallThickness || defaultParams.wallThickness;
   const trackThickness = current.trackThickness || defaultParams.trackThickness;
   const fitClearance = getPartFitClearance(envelope);
   const fittedLaneWidth = getFittedLaneWidth(envelope, fitClearance);
+  const entryFitClearance = getPartFitClearance(entryEnvelope);
+  const fittedEntryLaneWidth = getFittedLaneWidth(entryEnvelope, entryFitClearance);
   let trackWidth = ceilToStep(
     Math.max(
       14,
       fittedLaneWidth + wallThickness * 2.2,
       envelope.width * 1.12 + wallThickness * 2,
+      fittedEntryLaneWidth + wallThickness * 2.2,
+      entryEnvelope.width * 1.12 + wallThickness * 2,
     ),
     2,
   );
@@ -190,7 +201,15 @@ export function buildRecommendedParams(
   let diameterPadding = 0;
 
   for (let attempt = 0; attempt < 8; attempt += 1) {
-    const candidate = createRecommendedCandidate(current, envelope, trackWidth, outletHeight, diameterPadding);
+    const candidate = createRecommendedCandidate(
+      current,
+      envelope,
+      entryEnvelope,
+      partForwardAxis,
+      trackWidth,
+      outletHeight,
+      diameterPadding,
+    );
     const constraints = getMotionConstraints(candidate, envelope);
     let changed = false;
 
@@ -203,7 +222,7 @@ export function buildRecommendedParams(
         : constraints.requiredLaneWidth;
       const shortage = requiredWidth - limitingLaneWidth;
       trackWidth = roundToStep(trackWidth + Math.max(5, shortage + wallThickness * 1.5), 5);
-      diameterPadding += Math.max(10, envelope.length * 0.12);
+      diameterPadding += Math.max(10, envelope.length * 0.12, entryEnvelope.length * 0.12);
       changed = true;
     }
 
@@ -218,17 +237,33 @@ export function buildRecommendedParams(
     }
   }
 
-  return createRecommendedCandidate(current, envelope, trackWidth, outletHeight, diameterPadding);
+  return createRecommendedCandidate(
+    current,
+    envelope,
+    entryEnvelope,
+    partForwardAxis,
+    trackWidth,
+    outletHeight,
+    diameterPadding,
+  );
 }
 
 function createRecommendedCandidate(
   current: BowlParams,
   envelope: PhysicalEnvelope,
+  entryEnvelope: PhysicalEnvelope,
+  partForwardAxis: "x" | "z",
   trackWidth: number,
   outletHeight: number,
   diameterPadding: number,
 ): BowlParams {
-  const bowlDiameter = getRecommendedBowlDiameter(envelope, trackWidth, current, diameterPadding);
+  const bowlDiameter = getRecommendedBowlDiameter(
+    envelope,
+    entryEnvelope,
+    trackWidth,
+    current,
+    diameterPadding,
+  );
   const trackTurns = clamp(roundToStep(Math.max(1.5, bowlDiameter / 180), 0.5), 1.5, 5);
   const trackClimbAngleDeg = roundToStep(Math.max(current.trackClimbAngleDeg || 0, 3.5), 0.5);
   const fitClearance = getPartFitClearance(envelope);
@@ -250,12 +285,13 @@ function createRecommendedCandidate(
     Math.max(
       120,
       envelope.height * 4.5 + 70,
+      entryEnvelope.height * 4.5 + 70,
       getRequiredBowlHeightForTrackClimb(climbCandidate),
     ),
     10,
   );
   const baseLength = roundToStep(
-    Math.max(bowlDiameter + 100, envelope.length * 6, trackWidth * 8),
+    Math.max(bowlDiameter + 100, envelope.length * 6, entryEnvelope.length * 6, trackWidth * 8),
     10,
   );
 
@@ -278,6 +314,10 @@ function createRecommendedCandidate(
     partFitHeight: envelope.height,
     partFitLength: envelope.length,
     partFitWidth: envelope.width,
+    partEntryHeight: entryEnvelope.height,
+    partEntryLength: entryEnvelope.length,
+    partEntryWidth: entryEnvelope.width,
+    partForwardAxis,
     baseLength,
     baseWidth: baseLength,
     baseHeight: roundToStep(Math.max(60, bowlHeight * 0.42), 10),
@@ -286,6 +326,7 @@ function createRecommendedCandidate(
 
 function getRecommendedBowlDiameter(
   envelope: PhysicalEnvelope,
+  entryEnvelope: PhysicalEnvelope,
   trackWidth: number,
   current: BowlParams,
   diameterPadding: number,
@@ -296,6 +337,7 @@ function getRecommendedBowlDiameter(
   const baseDiameter = Math.max(
     300,
     envelope.length * 5.8 * profileScale,
+    entryEnvelope.length * 5.8 * profileScale,
     trackWidth * 7.8 * profileScale,
   );
 
@@ -304,12 +346,21 @@ function getRecommendedBowlDiameter(
 
 export function getAnalysisEnvelope(analysis: PartAnalysis, topFace: PartTopFace): PhysicalEnvelope {
   const size = getTopAlignedAnalysisSize(analysis, topFace);
-  const horizontal = [size.x, size.z].sort((a, b) => b - a);
+  const forwardAxis = getOrientationForwardAxis(topFace, size.x, size.z);
 
   return {
     height: size.y,
-    length: horizontal[0],
-    width: horizontal[1],
+    length: forwardAxis === "x" ? size.x : size.z,
+    width: forwardAxis === "x" ? size.z : size.x,
+  };
+}
+
+function getEntryAnalysisEnvelope(analysis: PartAnalysis, topFace: PartTopFace): PhysicalEnvelope {
+  const forwardAxis = getOrientationForwardAxis(topFace, analysis.length, analysis.width);
+  return {
+    height: analysis.height,
+    length: forwardAxis === "x" ? analysis.length : analysis.width,
+    width: forwardAxis === "x" ? analysis.width : analysis.length,
   };
 }
 

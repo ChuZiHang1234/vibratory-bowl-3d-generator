@@ -604,6 +604,16 @@ select:disabled {
   font-weight: 760;
 }
 
+.field-help {
+  color: #6f8390;
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.field-help-warning {
+  color: #a66528;
+}
+
 .segmented-control {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -897,6 +907,49 @@ select:disabled {
   height: 22px;
   border-radius: 999px;
   box-shadow: 0 6px 14px rgba(0, 0, 0, 0.24);
+}
+
+.orientation-guide-legend {
+  position: absolute;
+  bottom: 56px;
+  left: 12px;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 9px;
+  color: #d9e8ee;
+  border: 1px solid rgba(42, 151, 166, 0.58);
+  border-radius: 7px;
+  background: rgba(15, 29, 37, 0.86);
+  box-shadow: 0 10px 22px rgba(0, 0, 0, 0.2);
+  font-size: 10px;
+  font-weight: 700;
+  pointer-events: none;
+  backdrop-filter: blur(10px);
+}
+
+.orientation-guide-legend span {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.orientation-guide-legend b {
+  display: grid;
+  place-items: center;
+  width: 17px;
+  height: 17px;
+  color: #ffffff;
+  border-radius: 999px;
+  background: #168fa0;
+  font-size: 9px;
+}
+
+.orientation-guide-legend i {
+  color: #68c5d0;
+  font-style: normal;
 }
 
 .axis-y {
